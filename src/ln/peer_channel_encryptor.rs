@@ -242,7 +242,7 @@ impl PeerChannelEncryptor {
 	}
 
 	// Separated for testing:
-	fn process_act_one_with_ephemeral_key(&mut self, act_one: &[u8], our_node_secret: &SecretKey, our_ephemeral: SecretKey) -> Result<[u8; 50], HandleError> {
+	pub fn process_act_one_with_ephemeral_key(&mut self, act_one: &[u8], our_node_secret: &SecretKey, our_ephemeral: SecretKey) -> Result<[u8; 50], HandleError> {
 		assert_eq!(act_one.len(), 50);
 
 		match self.noise_state {

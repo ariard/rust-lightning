@@ -685,10 +685,14 @@ impl ChannelManager {
 						Ok(funding_msg) => {
 							(chan, funding_msg.0, funding_msg.1)
 						},
-						Err(_e) => {
-							//TODO: Push e to pendingevents
+						Err(e) => {
+							let mut pending_events = self.pending_events.lock().unwrap();
+							pending_events.push(events::Event::DisconnectPeer {
+								node_id: chan.get_their_node_id(),
+								msg: e,
+							});
 							return;
-						}
+						},
 					}
 				},
 				None => return
@@ -1810,6 +1814,12 @@ impl ChannelMessageHandler for ChannelManager {
 				pending_events.push(event);
 			}
 		}
+	}
+
+	//For testing purpose in peer_handler
+	fn push_event(&self, event: events::Event) {
+		let mut pending_events = self.pending_events.lock().unwrap();
+		pending_events.push(event);
 	}
 }
 

@@ -435,6 +435,9 @@ pub trait ChannelMessageHandler : events::EventsProvider + Send + Sync {
 	/// understand or indicate they require unknown feature bits), no_connection_possible is set
 	/// and any outstanding channels should be failed.
 	fn peer_disconnected(&self, their_node_id: &PublicKey, no_connection_possible: bool);
+
+	//Testing
+	fn push_event(&self, event: events::Event);
 }
 
 pub trait RoutingMessageHandler : Send + Sync {
@@ -1532,5 +1535,18 @@ impl MsgEncodable for OnionErrorPacket {
 		res.extend_from_slice(&byte_utils::be16_to_array(self.data.len() as u16));
 		res.extend_from_slice(&self.data);
 		res
+	}
+}
+
+impl MsgEncodable for HandleError {
+	fn encode(&self) -> Vec<u8> {
+		match self.msg.as_ref().unwrap() {
+			&ErrorAction::UpdateFailHTLC { ref msg } => msg.encode(),
+			_ => {
+				let mut res = Vec::with_capacity(self.err.len());
+				res.extend_from_slice(&self.err.as_bytes());
+				res
+			},
+		}
 	}
 }
