@@ -8,6 +8,9 @@ use secp256k1::key::PublicKey;
 
 use std::time::Instant;
 
+// need to add Err for funding_transaction_generated ?
+// DisconnetPeer message
+
 pub enum Event {
 	// Events a user will probably have to handle
 	/// Used to indicate that the client should generate a funding transaction with the given
@@ -94,6 +97,13 @@ pub enum Event {
 	BroadcastChannelUpdate {
 		msg: msgs::ChannelUpdate,
 	},
+	// Events indicating the network loop should change the state of peer connection
+	/// Used to indicate that the peer connection should be closed with the motive and msg
+	DisconnectPeer {
+		node_id: PublicKey,
+		err: &'static' str,
+		msg: msgs::ErrorAction, // pass down to be logged
+	}
 }
 
 pub trait EventsProvider {

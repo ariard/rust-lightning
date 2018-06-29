@@ -2029,6 +2029,7 @@ impl Channel {
 	fn get_outbound_funding_created_signature(&mut self) -> Result<(Signature, Transaction), HandleError> {
 		let funding_script = self.get_funding_redeemscript();
 
+		// here case of failure
 		let remote_keys = self.build_remote_transaction_keys()?;
 		let remote_initial_commitment_tx = self.build_commitment_transaction(self.cur_remote_commitment_transaction_number, &remote_keys, false, false).0;
 		let remote_sighash = Message::from_slice(&bip143::SighashComponents::new(&remote_initial_commitment_tx).sighash_all(&remote_initial_commitment_tx.input[0], &funding_script, self.channel_value_satoshis)[..]).unwrap();

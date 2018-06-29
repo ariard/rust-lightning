@@ -636,7 +636,7 @@ impl ChannelManager {
 				session_priv,
 			}).is_some() {
 				// TODO: We need to track these better, we're not generating these, so a
-				// third-party might make this happen:
+				// third-party might make this happen: => need to be logged?
 				panic!("payment_hash was repeated! Don't let this happen");
 			}
 
@@ -670,10 +670,17 @@ impl ChannelManager {
 						Ok(funding_msg) => {
 							(chan, funding_msg.0, funding_msg.1)
 						},
-						Err(_e) => {
+						//ariard
+						Err(e) => {
+							let mut pending_events  = self.pending_events.lock().unwrap();
+							pending_events.push(events::Event::DisconnectPeer {
+								node_id: chan.get_their_node_id(),
+								err: e.1,
+								msg: e.1,
+							});
 							//TODO: Push e to pendingevents
 							return;
-						}
+						},
 					}
 				},
 				None => return
@@ -2893,5 +2900,12 @@ mod tests {
 			assert_eq!(node.node.get_and_clear_pending_events().len(), 0);
 			assert_eq!(node.chan_monitor.added_monitors.lock().unwrap().len(), 0);
 		}
+	}
+
+	#[test]
+	fn test_disconnect_malicious_peer() {
+		//gen me
+		//gen other node
+		//gen poisoned packet
 	}
 }

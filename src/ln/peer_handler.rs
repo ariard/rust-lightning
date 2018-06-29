@@ -700,6 +700,14 @@ impl<Descriptor: SocketDescriptor> PeerManager<Descriptor> {
 						}
 						continue;
 					},
+					Event::DisconnectPeer { ref node_id, ref err, ref msg } => {
+						let (mut descriptor, peer) = get_peer_for_forwarding!(node_id, {
+							});
+						self.disconnect_event(&descriptor);
+						// maybe let upstream do something with err
+						// log msg
+						continue;
+					}
 				}
 
 				upstream_events.push(event);
