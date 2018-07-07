@@ -675,8 +675,8 @@ impl ChannelManager {
 							let mut pending_events  = self.pending_events.lock().unwrap();
 							pending_events.push(events::Event::DisconnectPeer {
 								node_id: chan.get_their_node_id(),
-								err: e.1,
-								msg: e.1,
+								err: e.err,
+								msg: e.msg.unwrap(),
 							});
 							//TODO: Push e to pendingevents
 							return;
@@ -1808,12 +1808,14 @@ impl ChannelMessageHandler for ChannelManager {
 #[cfg(test)]
 mod tests {
 	use chain::chaininterface;
-	use ln::channelmanager::{ChannelManager,OnionKeys};
+	use ln::channelmanager::{ChannelManager,OnionKeys, ChannelKeys};
+	use ln::channel::{Channel};
 	use ln::router::{Route, RouteHop, Router};
 	use ln::msgs;
-	use ln::msgs::{MsgEncodable,ChannelMessageHandler,RoutingMessageHandler};
+	use ln::msgs::{MsgEncodable,ChannelMessageHandler,RoutingMessageHandler, HandleError};
 	use util::test_utils;
 	use util::events::{Event, EventsProvider};
+	use util::rng;
 
 	use bitcoin::util::misc::hex_bytes;
 	use bitcoin::util::hash::Sha256dHash;
@@ -2904,8 +2906,48 @@ mod tests {
 
 	#[test]
 	fn test_disconnect_malicious_peer() {
-		//gen me
-		//gen other node
-		//gen poisoned packet
+		//no need to modify create_network, just pop Nodes, keys are loaded at chan creation
+		let nodes = create_network(2); 
+
+		//open create_chan_between_nodes
+		let open_chan = nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 100000, 42).unwrap();
+		//tweak handle_open_channel
+		//let accept_chan = nodes[1].node.handle_open_channel(&nodes[0].node.get_our_node_id(), &open_chan).unwrap();
+
+		let accept_chan : msgs::AcceptChannel = {
+			let mut channel_state = nodes[1].node.channel_state.lock().unwrap();
+			let mut key_seed = [0u8;32];
+			rng::fill_bytes(&mut key_seed);
+			//tweak here ?
+			let chan_keys = match ChannelKeys::new_from_seed(&key_seed) {
+				Ok(key) => key,
+				Err(_) => panic!("RNG is busted!")
+			};
+			let channel = Channel::new_from_req(&*nodes[1].node.fee_estimator, chan_keys, nodes[0].node.get_our_node_id().clone(), &open_chan, 0, nodes[1].node.announce_channels_publicly).unwrap();
+			let accept_msg = channel.get_accept_channel().unwrap();
+			channel_state.by_id.insert(channel.channel_id(), channel);
+			accept_msg
+		};
+
+		nodes[0].node.handle_accept_channel(&nodes[1].node.get_our_node_id(), &accept_chan).unwrap();
+
+		let chan_id = unsafe { CHAN_COUNT };
+		let tx;
+		let funding_output;
+
+		let events_1 = nodes[0].node.get_and_clear_pending_events();
+		assert_eq!(events_1.len(), 1);
+		match events_1[0] {
+			Event::FundingGenerationReady { ref temporary_channel_id, ref channel_value_satoshis, ref output_script, user_channel_id } => {
+				tx = Transaction { version: chan_id as u32, lock_time: 0, input: Vec::new(), output: vec![TxOut {
+					value: *channel_value_satoshis, script_pubkey: output_script.clone(),
+				}]};
+				funding_output = (Sha256dHash::from_data(&serialize(&tx).unwrap()[..]), 0);
+
+				nodes[0].node.funding_transaction_generated(&temporary_channel_id, funding_output.clone());
+			},
+			_ => panic!("Unexpected event"),
+		}
+
 	}
 }

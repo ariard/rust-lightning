@@ -101,7 +101,7 @@ pub enum Event {
 	/// Used to indicate that the peer connection should be closed with the motive and msg
 	DisconnectPeer {
 		node_id: PublicKey,
-		err: &'static' str,
+		err: &'static str,
 		msg: msgs::ErrorAction, // pass down to be logged
 	}
 }
