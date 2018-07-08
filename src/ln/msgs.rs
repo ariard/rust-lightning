@@ -1534,3 +1534,16 @@ impl MsgEncodable for OnionErrorPacket {
 		res
 	}
 }
+
+impl MsgEncodable for HandleError {
+	fn encode(&self) -> Vec<u8> {
+		match self.msg.as_ref().unwrap() {
+			ErrorAction::UpdateFailHTLC { msg } => msg.encode(),
+			_ => {
+				let mut res = Vec::with_capacity(self.err.len());
+				res.extend_from_slice(&self.err.as_bytes());
+				res
+			},
+		}
+	}
+}

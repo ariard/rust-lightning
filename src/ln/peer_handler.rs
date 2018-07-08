@@ -700,12 +700,15 @@ impl<Descriptor: SocketDescriptor> PeerManager<Descriptor> {
 						}
 						continue;
 					},
-					Event::DisconnectPeer { ref node_id, ref err, ref msg } => {
+					Event::DisconnectPeer { ref node_id, ref msg } => {
+						println!("flag B");
 						let (mut descriptor, peer) = get_peer_for_forwarding!(node_id, {
+								//TODO: Do whatever we're gonna do for handling dropped messages
 							});
+						peer.pending_outbound_buffer.push_back(peer.channel_encryptor.encrypt_message(&encode_msg!(msg, 17)));
+						Self::do_attempt_write_data(&mut descriptor, peer);
 						self.disconnect_event(&descriptor);
-						// maybe let upstream do something with err
-						// log msg
+						// TODO: log err for take further action upon it
 						continue;
 					}
 				}
@@ -752,5 +755,84 @@ impl<Descriptor: SocketDescriptor> EventsProvider for PeerManager<Descriptor> {
 		let mut ret = Vec::new();
 		mem::swap(&mut ret, &mut *pending_events);
 		ret
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use chain::chaininterface;
+	use ln::peer_handler::{PeerManager, MessageHandler, SocketDescriptor};
+	use ln::channelmanager::{ChannelManager};
+	use ln::router::{Router};
+	use ln::msgs;
+	use ln::msgs::{HandleError};
+	use util::test_utils;
+	use util::events;
+
+	use bitcoin::network::constants::Network;
+
+	use secp256k1::Secp256k1;
+	use secp256k1::key::{SecretKey, PublicKey};
+
+	use rand::{thread_rng,Rng};
+	
+	use std::sync::{Arc, Mutex};
+
+	#[derive(PartialEq, Eq, Clone, Hash)]
+	struct FileDescriptor {
+		fd: u16,
+	}
+
+	impl SocketDescriptor for FileDescriptor {
+		fn send_data(&mut self, data: &Vec<u8>, write_offset: usize, resume_read: bool) -> usize {
+			data.len()
+		}
+	}
+
+	fn create_network(peer_count: usize) -> Vec<PeerManager<FileDescriptor>> {
+		let mut secp_ctx = Secp256k1::new();
+		let mut peers = Vec::new();
+		let mut rng = thread_rng();
+
+		for _ in 0..peer_count {
+			let feeest = Arc::new(test_utils::TestFeeEstimator { sat_per_vbyte: 1 });
+			let chain_monitor = Arc::new(chaininterface::ChainWatchInterfaceUtil::new());
+			let tx_broadcaster = Arc::new(test_utils::TestBroadcaster{txn_broadcasted: Mutex::new(Vec::new())});
+			let chan_monitor = Arc::new(test_utils::TestChannelMonitor::new(chain_monitor.clone(), tx_broadcaster.clone()));
+			let node_id = {
+				let mut key_slice = [0;32];
+				rng.fill_bytes(&mut key_slice);
+				SecretKey::from_slice(&secp_ctx, &key_slice).unwrap()
+			};
+			let node = ChannelManager::new(node_id.clone(), 0, true, Network::Testnet, feeest.clone(), chan_monitor.clone(), chain_monitor.clone(), tx_broadcaster.clone()).unwrap();
+			let router = Router::new(PublicKey::from_secret_key(&secp_ctx, &node_id).unwrap());
+			let msg_handler = MessageHandler { chan_handler: node, route_handler: Arc::new(router) };
+			let peer = PeerManager::new(msg_handler, node_id);
+			peers.push(peer);
+		}
+
+		peers
+	}
+
+	#[test]
+	fn test_disconnect_peer() {
+		// write comment
+		let peers = create_network(2);
+
+		let secp_ctx = Secp256k1::new();
+		let their_id = PublicKey::from_secret_key(&secp_ctx, &peers[1].our_node_secret).unwrap();
+		peers[0].new_outbound_connection(their_id,FileDescriptor { fd: 1 });
+		assert_eq!(peers[0].peers.lock().unwrap().peers.len(), 1);
+
+		{
+			//how to access interface manually ? 
+			let mut pending_events = peers[0].message_handler.chan_handler.pending_events.lock().unwrap();
+			pending_events.push(events::Event::DisconnectPeer {
+				node_id: their_id,
+				msg: HandleError { err: "test disconnect peer 1", msg: Some(msgs::ErrorAction::DisconnectPeer)},
+			});
+		}
+		peers[0].process_events();
+		assert_eq!(peers[0].peers.lock().unwrap().peers.len(), 0);
 	}
 }

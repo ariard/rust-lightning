@@ -97,12 +97,11 @@ pub enum Event {
 	BroadcastChannelUpdate {
 		msg: msgs::ChannelUpdate,
 	},
-	// Events indicating the network loop should change the state of peer connection
-	/// Used to indicate that the peer connection should be closed with the motive and msg
+	// Events indicating the network loop should change the state of peer connection:
+	/// Used to indicate that the peer connection should be closed with a message holding the reason
 	DisconnectPeer {
 		node_id: PublicKey,
-		err: &'static str,
-		msg: msgs::ErrorAction, // pass down to be logged
+		msg: msgs::HandleError, 
 	}
 }
 
