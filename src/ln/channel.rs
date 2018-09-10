@@ -86,7 +86,7 @@ impl ChannelKeys {
 	}
 }
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Clone)]
 enum HTLCState {
 	/// Added by remote, to be included in next local commitment tx.
 	/// Implies HTLCOutput::outbound: false
@@ -150,6 +150,24 @@ enum HTLCState {
 	LocalRemoved,
 }
 
+impl std::fmt::Display for HTLCState {
+	fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
+		match *self {
+			HTLCState::RemoteAnnounced => write!(f, "RemoteAnnounced")?,
+			HTLCState::AwaitingRemoteRevokeToAnnounce => write!(f, "AwaitingRemoteRevokeToAnnounce")?,
+			HTLCState::AwaitingAnnouncedRemoteRevoke => write!(f, "AwaitingAnnouncedRemoteRevoke")?,
+			HTLCState::LocalAnnounced => write!(f, "LocalAnnounced")?,
+			HTLCState::Committed => write!(f, "Committed")?,
+			HTLCState::RemoteRemoved => write!(f, "RemoteRemoved")?,
+			HTLCState::AwaitingRemoteRevokeToRemove => write!(f, "AwaitingRemoteRevokeToRemove")?,
+			HTLCState::AwaitingRemovedRemoteRevoke => write!(f, "AwaitingRmoevedRemmoteRevoke")?,
+			HTLCState::LocalRemoved => write!(f, "LocalRemoved")?
+		};
+		Ok(())
+	}
+}
+
+#[derive(Clone)]
 struct HTLCOutput { //TODO: Refactor into Outbound/InboundHTLCOutput (will save memory and fewer panics)
 	outbound: bool, // ie to an HTLC-Timeout transaction
 	htlc_id: u64,
@@ -178,6 +196,7 @@ impl HTLCOutput {
 }
 
 /// See AwaitingRemoteRevoke ChannelState for more info
+#[derive(Clone)]
 enum HTLCUpdateAwaitingACK {
 	AddHTLC {
 		// always outbound
@@ -315,6 +334,35 @@ pub struct Channel {
 	channel_monitor: ChannelMonitor,
 
 	logger: Arc<Logger>,
+}
+
+/// State of Channel with core state infos
+pub struct ChannelCurrent {
+	channel_id: [u8; 32],
+	short_channel_id: u64,
+	channel_state: u32,
+	channel_value_satoshis: u64,
+	cur_local_commitment_transaction_number: u64,
+	cur_remote_commitment_transaction_number: u64,
+	value_to_self_sat: u64,
+	value_to_remote_sat: u64, //Assuming pending_htlc in favor of remote are settled the right way
+	pending_htlcs: Vec<HTLCOutput>,
+	holding_cell_htlc_updates: Vec<HTLCUpdateAwaitingACK>,	
+	channel_update_count: u32,
+}
+
+impl std::fmt::Display for ChannelCurrent {
+	fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
+		write!(f, "Channel : {}\n short_channel_id {}\n channel_state {}\n channel_value_satoshis {}\n
+		cur_local_commitment_transaction_number {}\n cur_remote_commitment_transaction_number {}\n value_to_self_sat {}\n value_to_remote_sat {}\n channel_update_count {}\n", log_bytes!(self.channel_id), self.short_channel_id, self.channel_state, self.channel_value_satoshis, self.cur_local_commitment_transaction_number, self.cur_remote_commitment_transaction_number, self.value_to_self_sat, self.value_to_remote_sat, self.channel_update_count)?;
+		for ref htlc in self.pending_htlcs.iter() {
+			write!(f, "    HTLC {}\n    outbound {}\n    amount_msat {}\n    cltv_expiry {}\n    payment_hash {}\n    state {}\n", htlc.htlc_id, htlc.outbound, htlc.amount_msat, htlc.cltv_expiry, log_bytes!(htlc.payment_hash), htlc.state)?;
+		}
+		//for htlc_updates in self.holding_cell_htlc_updates {
+		//	write!(f, "    HLTCUpdate {}\n", htlc_updates);
+		//}
+		Ok(())
+	}
 }
 
 const OUR_MAX_HTLCS: u16 = 5; //TODO
@@ -1996,6 +2044,23 @@ impl Channel {
 	/// Allowed in any state (including after shutdown)
 	pub fn get_channel_update_count(&self) -> u32 {
 		self.channel_update_count
+	}
+
+	/// Get a ChannelCurrent mostly useful for debbuging
+	pub fn get_channel_current(&self) -> ChannelCurrent {
+		ChannelCurrent {
+			channel_id: self.channel_id,
+			short_channel_id: if self.short_channel_id.is_some() { self.short_channel_id.unwrap() } else { 0 },
+			channel_state: self.channel_state.clone(),
+			channel_value_satoshis: self.channel_value_satoshis,
+			cur_local_commitment_transaction_number: self.cur_local_commitment_transaction_number,
+			cur_remote_commitment_transaction_number: self.cur_remote_commitment_transaction_number,
+			value_to_self_sat: self.value_to_self_msat / 1000,
+			value_to_remote_sat: (self.channel_value_satoshis - self.value_to_self_msat) / 1000,
+			pending_htlcs: self.pending_htlcs.clone(),
+			holding_cell_htlc_updates: self.holding_cell_htlc_updates.clone(),
+			channel_update_count: self.channel_update_count,
+		}
 	}
 
 	pub fn should_announce(&self) -> bool {

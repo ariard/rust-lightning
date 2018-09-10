@@ -12,7 +12,7 @@ use secp256k1;
 
 use chain::chaininterface::{BroadcasterInterface,ChainListener,ChainWatchInterface,FeeEstimator};
 use chain::transaction::OutPoint;
-use ln::channel::{Channel, ChannelKeys};
+use ln::channel::{Channel, ChannelKeys, ChannelCurrent};
 use ln::channelmonitor::ManyChannelMonitor;
 use ln::router::{Route,RouteHop};
 use ln::msgs;
@@ -387,6 +387,17 @@ impl ChannelManager {
 		res
 	}
 
+	/// Gets the list of tips of channels, in random order. See ChannelCurrent field documentation for
+	/// more information.
+	pub fn list_state_channels(&self) -> Vec<ChannelCurrent> {
+		let channel_state = self.channel_state.lock().unwrap();
+		let mut res = Vec::with_capacity(channel_state.by_id.len());
+		for (channel_id, channel) in channel_state.by_id.iter() {
+			res.push(channel.get_channel_current());
+		}
+		res
+	}
+ 
 	/// Begins the process of closing a channel. After this call (plus some timeout), no new HTLCs
 	/// will be accepted on the given channel, and after additional timeout/the closing of all
 	/// pending HTLCs, the channel will be closed on chain.
