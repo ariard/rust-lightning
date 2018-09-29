@@ -1136,19 +1136,19 @@ impl ChannelMonitor {
 	/// Attempts to claim any claimable HTLCs in a commitment transaction which was not (yet)
 	/// revoked using data in local_claimable_outpoints.
 	/// Should not be used if check_spend_revoked_transaction succeeds.
-	fn check_spend_local_transaction(&self, tx: &Transaction, _height: u32) -> Vec<Transaction> {
+	fn check_spend_local_transaction(&self, tx: &Transaction, _height: u32) -> (Vec<Transaction>, (Sha256dHash, Vec<TxOut>)) {
 		let commitment_txid = tx.txid();
 		if let &Some(ref local_tx) = &self.current_local_signed_commitment_tx {
 			if local_tx.txid == commitment_txid {
-				return self.broadcast_by_local_state(local_tx);
+				return (self.broadcast_by_local_state(local_tx), (commitment_txid, tx.output.clone()))
 			}
 		}
 		if let &Some(ref local_tx) = &self.prev_local_signed_commitment_tx {
 			if local_tx.txid == commitment_txid {
-				return self.broadcast_by_local_state(local_tx);
+				return (self.broadcast_by_local_state(local_tx), (commitment_txid, tx.output.clone()))
 			}
 		}
-		Vec::new()
+		(Vec::new(), (commitment_txid, Vec::new()))
 	}
 
 	fn block_connected(&self, txn_matched: &[&Transaction], height: u32, broadcaster: &BroadcasterInterface)-> Vec<(Sha256dHash, Vec<TxOut>)> {
@@ -1168,7 +1168,11 @@ impl ChannelMonitor {
 						watch_outputs.push(new_outputs);
 					}
 					if txn.is_empty() {
-						txn = self.check_spend_local_transaction(tx, height);
+						let (local_txn, new_outputs) = self.check_spend_local_transaction(tx, height);
+						txn = local_txn;
+						if !new_outputs.1.is_empty() {
+							watch_outputs.push(new_outputs);
+						}
 					}
 				} else {
 					let remote_commitment_txn_on_chain = self.remote_commitment_txn_on_chain.lock().unwrap();

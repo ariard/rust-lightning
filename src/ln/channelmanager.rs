@@ -3809,7 +3809,7 @@ mod tests {
 					false
 				} else { true }
 			});
-			assert_eq!(res.len(), 2);
+			assert!(res.len() >= 2);
 		}
 
 		assert!(node_txn.is_empty());
