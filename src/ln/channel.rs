@@ -1086,7 +1086,7 @@ impl Channel {
 			}
 		}
 		if pending_idx == std::usize::MAX {
-			debug_assert!(false, "Unable to find a pending HTLC which matched the given HTLC ID");
+			//TODO: how to go around collisions ? debug_assert!(false, "Unable to find a pending HTLC which matched the given HTLC ID {}", htlc_id_arg);
 			return Err(HandleError{err: "Unable to find a pending HTLC which matched the given HTLC ID", action: Some(msgs::ErrorAction::IgnoreError)});
 		}
 
@@ -1167,7 +1167,7 @@ impl Channel {
 			}
 		}
 		if pending_idx == std::usize::MAX {
-			debug_assert!(false, "Unable to find a pending HTLC which matched the given HTLC ID");
+			//TODO: how to go around collision ? debug_assert!(false, "Unable to find a pending HTLC which matched the given HTLC ID");
 			return Err(HandleError{err: "Unable to find a pending HTLC which matched the given HTLC ID", action: Some(msgs::ErrorAction::IgnoreError)});
 		}
 
@@ -2928,7 +2928,7 @@ impl Channel {
 	/// those explicitly stated to be allowed after shutdown completes, eg some simple getters).
 	/// Also returns the list of payment_hashes for channels which we can safely fail backwards
 	/// immediately (others we will have to allow to time out).
-	pub fn force_shutdown(&mut self) -> (Vec<Transaction>, Vec<(HTLCSource, [u8; 32])>) {
+	pub fn force_shutdown(&mut self) -> (Vec<Transaction>, Vec<(HTLCSource, [u8; 32])>, Vec<[u8;32]>) {
 		assert!(self.channel_state != ChannelState::ShutdownComplete as u32);
 
 		// We go ahead and "free" any holding cell HTLCs or HTLCs we haven't yet committed to and
@@ -2943,17 +2943,19 @@ impl Channel {
 			}
 		}
 
-		for _htlc in self.pending_outbound_htlcs.drain(..) {
-			//TODO: Do something with the remaining HTLCs
-			//(we need to have the ChannelManager monitor them so we can claim the inbound HTLCs
-			//which correspond)
+		let mut unsolved_htlcs = Vec::with_capacity(self.pending_outbound_htlcs.len() + self.pending_inbound_htlcs.len());
+		for outbound_htlcs in self.pending_outbound_htlcs.iter() {
+			unsolved_htlcs.push(outbound_htlcs.payment_hash);
+		}
+		for inbound_htlcs in self.pending_inbound_htlcs.iter() {
+			unsolved_htlcs.push(inbound_htlcs.payment_hash);
 		}
 
 		self.channel_state = ChannelState::ShutdownComplete as u32;
 		self.channel_update_count += 1;
 		let mut res = Vec::new();
 		mem::swap(&mut res, &mut self.last_local_commitment_txn);
-		(res, dropped_outbound_htlcs)
+		(res, dropped_outbound_htlcs, unsolved_htlcs)
 	}
 }
 

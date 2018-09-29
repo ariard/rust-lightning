@@ -948,6 +948,29 @@ impl ChannelMonitor {
 						}
 					}
 
+					macro_rules! sign_input_timeout {
+						($sighash_parts: expr, $input: expr, $amount: expr) => {
+							{
+								let (sig, redeemscript) = match self.key_storage {
+									KeyStorage::PrivMode { ref htlc_base_key, .. } => {
+										let htlc = &per_commitment_option.unwrap()[$input.sequence as usize];
+										let redeemscript = chan_utils::get_htlc_redeemscript_with_explicit_keys(htlc, &a_htlc_key, &b_htlc_key, &revocation_pubkey);
+										let sighash = ignore_error!(Message::from_slice(&$sighash_parts.sighash_all(&$input, &redeemscript, $amount)[..]));
+										let htlc_key = ignore_error!(chan_utils::derive_private_key(&self.secp_ctx, revocation_point, &htlc_base_key));
+										(self.secp_ctx.sign(&sighash, &htlc_key), redeemscript)
+									},
+									KeyStorage::SigsMode { .. } => {
+										unimplemented!();
+									}
+								};
+								$input.witness.push(sig.serialize_der(&self.secp_ctx).to_vec());
+								$input.witness[0].push(SigHashType::All as u8);
+								$input.witness.push(vec![0]);
+								$input.witness.push(redeemscript.into_bytes());
+							}
+						}
+					}
+
 					for (idx, htlc) in per_commitment_data.iter().enumerate() {
 						if let Some(payment_preimage) = self.payment_preimages.get(&htlc.payment_hash) {
 							let input = TxIn {
@@ -977,6 +1000,29 @@ impl ChannelMonitor {
 								sign_input!(sighash_parts, single_htlc_tx.input[0], htlc.amount_msat / 1000, payment_preimage.to_vec());
 								txn_to_broadcast.push(single_htlc_tx);
 							}
+						}
+						if !htlc.offered {
+							let input = TxIn {
+								previous_output: BitcoinOutPoint {
+									txid: commitment_txid,
+									vout: htlc.transaction_output_index,
+								},
+								script_sig: Script::new(),
+								sequence: idx as u32,
+								witness: Vec::new(),
+							};
+							let mut timeout_tx = Transaction {
+								version: 2,
+								lock_time: htlc.cltv_expiry,
+								input: vec![input],
+								output: vec!(TxOut {
+									script_pubkey: self.destination_script.clone(),
+									value: htlc.amount_msat / 1000,
+								}),
+							};
+							let sighash_parts = bip143::SighashComponents::new(&timeout_tx);
+							sign_input_timeout!(sighash_parts, timeout_tx.input[0], htlc.amount_msat / 1000);
+							txn_to_broadcast.push(timeout_tx);
 						}
 					}
 
