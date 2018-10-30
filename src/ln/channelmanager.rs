@@ -3190,8 +3190,10 @@ mod tests {
 	use util::ser::{Writeable, Writer, ReadableArgs};
 
 	use bitcoin::util::hash::Sha256dHash;
+	use bitcoin::util::bip143;
 	use bitcoin::blockdata::block::{Block, BlockHeader};
-	use bitcoin::blockdata::transaction::{Transaction, TxOut};
+	use bitcoin::blockdata::transaction::{Transaction, TxOut, TxIn, SigHashType};
+	use bitcoin::blockdata::script::Script;
 	use bitcoin::blockdata::constants::genesis_block;
 	use bitcoin::network::constants::Network;
 	use bitcoin::network::serialize::serialize;
@@ -7051,8 +7053,11 @@ mod tests {
 		if let Err(msgs::HandleError { action: Some(msgs::ErrorAction::SendErrorMessage { msg }), .. }) = nodes[0].node.handle_channel_reestablish(&nodes[3].node.get_our_node_id(), &reestablish) {
 			assert_eq!(msg.channel_id, channel_id);
 		} else { panic!("Unexpected result"); }
+	}
+
 	#[test]
 	fn test_claim_sizeable_push_msat() {
+		// Incidentally test SpendableOutput evenet generation due to detection of to_local output on commitment tx
 		let nodes = create_network(2);
 	
 		let chan = create_announced_chan_between_nodes_with_value(&nodes, 0, 1, 100000, 100000);
@@ -7065,11 +7070,37 @@ mod tests {
 		let node_txn = nodes[1].tx_broadcaster.txn_broadcasted.lock().unwrap();
 		assert_eq!(node_txn.len(), 1);
 		check_spends!(node_txn[0], chan.3.clone());
-		assert_eq!(node_txn.ouput.len(), 1);
-
-
-
-		println!("commitment tx {}", node_txn.len())
+		assert_eq!(node_txn[0].output.len(), 1);
+		
+		let header = BlockHeader { version: 0x20000000, prev_blockhash: Default::default(), merkle_root: Default::default(), time: 42, bits: 42, nonce: 42 };
+		nodes[1].chain_monitor.block_connected_with_filtering(&Block { header, txdata: vec![node_txn[0].clone()] }, 0);
+		let events = nodes[1].chan_monitor.simple_monitor.get_and_clear_pending_events();
+		let spend_tx = match events[0] {
+			Event::SpendableOutputs { ref outputs } => {
+				let input = TxIn {
+					previous_output: outputs[0].outpoint.clone(),
+					script_sig: Script::new(),
+					sequence: outputs[0].to_self_delay,
+					witness: Vec::new(),
+				};
+				let mut spend_tx = Transaction {
+					version: 2,
+					lock_time: 0,
+					input: vec![input],
+					output: Vec::new(),
+				};
+				let sighash_parts = bip143::SighashComponents::new(&spend_tx);
+				let sighash = Message::from_slice(&bip143::SighashComponents::new(&spend_tx).sighash_all(&spend_tx.input[0], &outputs[0].witness_script, 100000)[..]).unwrap();
+				let secp_ctx = Secp256k1::new();
+				let sig = secp_ctx.sign(&sighash, &outputs.local_delayedkey);
+				spend_tx.input[0].witness_push(sig.serialize_der(&secp_ctx).to_vec());
+				spend_tx.input[0].witness[0].push(SigHashType::All as u8);
+				spend_tx.input[0].witness.push(vec!(1));
+				spend_tx.input[0].witness.push(outputs.witness_script.into_bytes());
+			},
+			_ => panic!("Unexpected event"),
+		};
+		check_spends!(spend_tx, node_txn[0].clone());
 	}
 
 	fn test_handle_first_commitment_tx() {
