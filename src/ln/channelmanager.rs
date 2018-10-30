@@ -7051,5 +7051,28 @@ mod tests {
 		if let Err(msgs::HandleError { action: Some(msgs::ErrorAction::SendErrorMessage { msg }), .. }) = nodes[0].node.handle_channel_reestablish(&nodes[3].node.get_our_node_id(), &reestablish) {
 			assert_eq!(msg.channel_id, channel_id);
 		} else { panic!("Unexpected result"); }
+	#[test]
+	fn test_claim_sizeable_push_msat() {
+		let nodes = create_network(2);
+	
+		let chan = create_announced_chan_between_nodes_with_value(&nodes, 0, 1, 100000, 100000);
+		nodes[1].node.force_close_channel(&chan.2);
+		let events = nodes[1].node.get_and_clear_pending_events();
+		match events[0] {
+			Event::BroadcastChannelUpdate { .. } => {},
+			_ => panic!("Unexpected event"),
+		}
+		let node_txn = nodes[1].tx_broadcaster.txn_broadcasted.lock().unwrap();
+		assert_eq!(node_txn.len(), 1);
+		check_spends!(node_txn[0], chan.3.clone());
+		assert_eq!(node_txn.ouput.len(), 1);
+
+
+
+		println!("commitment tx {}", node_txn.len())
+	}
+
+	fn test_handle_first_commitment_tx() {
+		//TODO: spend first commitment if given a preimage
 	}
 }

@@ -604,7 +604,7 @@ impl Channel {
 		let mut channel_monitor = ChannelMonitor::new(&chan_keys.revocation_base_key, &chan_keys.delayed_payment_base_key,
 		                                              &chan_keys.htlc_base_key, BREAKDOWN_TIMEOUT,
 		                                              keys_provider.get_destination_script(), logger.clone());
-		channel_monitor.set_their_base_keys(&msg.htlc_basepoint, &msg.delayed_payment_basepoint);
+		channel_monitor.set_their_base_keys_and_first_per_commitment_point(&msg.htlc_basepoint, &msg.delayed_payment_basepoint, INITIAL_COMMITMENT_NUMBER - 1, &msg.first_per_commitment_point);
 		channel_monitor.set_their_to_self_delay(msg.to_self_delay);
 
 		let mut chan = Channel {
@@ -1312,7 +1312,7 @@ impl Channel {
 		// max_accepted_htlcs too small
 		// dust_limit_satoshis too small
 
-		self.channel_monitor.set_their_base_keys(&msg.htlc_basepoint, &msg.delayed_payment_basepoint);
+		self.channel_monitor.set_their_base_keys_and_first_per_commitment_point(&msg.htlc_basepoint, &msg.delayed_payment_basepoint, INITIAL_COMMITMENT_NUMBER - 1 , &msg.first_per_commitment_point);
 
 		self.their_dust_limit_satoshis = msg.dust_limit_satoshis;
 		self.their_max_htlc_value_in_flight_msat = cmp::min(msg.max_htlc_value_in_flight_msat, self.channel_value_satoshis * 1000);
@@ -1336,22 +1336,25 @@ impl Channel {
 		Ok(())
 	}
 
-	fn funding_created_signature(&mut self, sig: &Signature) -> Result<(Transaction, Signature), HandleError> {
+	fn funding_created_signature(&mut self, sig: &Signature) -> Result<(Transaction, Transaction, Signature), HandleError> {
 		let funding_script = self.get_funding_redeemscript();
 
 		let local_keys = self.build_local_transaction_keys(self.cur_local_commitment_transaction_number)?;
-		let local_initial_commitment_tx = self.build_commitment_transaction(self.cur_local_commitment_transaction_number, &local_keys, true, false, self.feerate_per_kw).0;
+		let mut local_initial_commitment_tx = self.build_commitment_transaction(self.cur_local_commitment_transaction_number, &local_keys, true, false, self.feerate_per_kw).0;
 		let local_sighash = Message::from_slice(&bip143::SighashComponents::new(&local_initial_commitment_tx).sighash_all(&local_initial_commitment_tx.input[0], &funding_script, self.channel_value_satoshis)[..]).unwrap();
 
-		// They sign the "local" commitment transaction, allowing us to broadcast the tx if we wish.
+		// They sign the "local" commitment transaction...
 		secp_call!(self.secp_ctx.verify(&local_sighash, &sig, &self.their_funding_pubkey.unwrap()), "Invalid funding_created signature from peer", self.channel_id());
+
+		// ...and we sign it, allowing us ot broadcast the tx if we wish
+		self.sign_commitment_transaction(&mut local_initial_commitment_tx, sig);
 
 		let remote_keys = self.build_remote_transaction_keys()?;
 		let remote_initial_commitment_tx = self.build_commitment_transaction(self.cur_remote_commitment_transaction_number, &remote_keys, false, false, self.feerate_per_kw).0;
 		let remote_sighash = Message::from_slice(&bip143::SighashComponents::new(&remote_initial_commitment_tx).sighash_all(&remote_initial_commitment_tx.input[0], &funding_script, self.channel_value_satoshis)[..]).unwrap();
 
 		// We sign the "remote" commitment transaction, allowing them to broadcast the tx if they wish.
-		Ok((remote_initial_commitment_tx, self.secp_ctx.sign(&remote_sighash, &self.local_keys.funding_key)))
+		Ok((remote_initial_commitment_tx, local_initial_commitment_tx, self.secp_ctx.sign(&remote_sighash, &self.local_keys.funding_key)))
 	}
 
 	pub fn funding_created(&mut self, msg: &msgs::FundingCreated) -> Result<(msgs::FundingSigned, ChannelMonitor), HandleError> {
@@ -1374,7 +1377,7 @@ impl Channel {
 		let funding_txo_script = self.get_funding_redeemscript().to_v0_p2wsh();
 		self.channel_monitor.set_funding_info((funding_txo, funding_txo_script));
 
-		let (remote_initial_commitment_tx, our_signature) = match self.funding_created_signature(&msg.signature) {
+		let (remote_initial_commitment_tx, local_initial_commitment_tx, our_signature) = match self.funding_created_signature(&msg.signature) {
 			Ok(res) => res,
 			Err(e) => {
 				self.channel_monitor.unset_funding_info();
@@ -1385,6 +1388,7 @@ impl Channel {
 		// Now that we're past error-generating stuff, update our local state:
 
 		self.channel_monitor.provide_latest_remote_commitment_tx_info(&remote_initial_commitment_tx, Vec::new(), self.cur_remote_commitment_transaction_number);
+		self.last_local_commitment_txn = vec![local_initial_commitment_tx];
 		self.channel_state = ChannelState::FundingSent as u32;
 		self.channel_id = funding_txo.to_channel_id();
 		self.cur_remote_commitment_transaction_number -= 1;
@@ -1456,7 +1460,6 @@ impl Channel {
 
 		self.their_prev_commitment_point = self.their_cur_commitment_point;
 		self.their_cur_commitment_point = Some(msg.next_per_commitment_point);
-		self.channel_monitor.init_remote_per_commitment_point(self.cur_remote_commitment_transaction_number, msg.next_per_commitment_point);
 		Ok(())
 	}
 

@@ -393,10 +393,6 @@ impl ChannelMonitor {
 		res
 	}
 
-	pub(super) fn init_remote_per_commitment_point(&mut self, idx: u64, revocation_point: PublicKey) {
-		self.their_cur_revocation_points = Some((idx, revocation_point, None));
-	}
-
 	/// Inserts a revocation secret into this channel monitor. Also optionally tracks the next
 	/// revocation point which may be required to claim HTLC outputs which we know the preimage of
 	/// in case the remote end force-closes using their latest state. Prunes old preimages if neither
@@ -575,9 +571,11 @@ impl ChannelMonitor {
 	}
 
 	/// We log these base keys at channel opening to being able to rebuild redeemscript in case of leaked revoked commit tx
-	pub(super) fn set_their_base_keys(&mut self, their_htlc_base_key: &PublicKey, their_delayed_payment_base_key: &PublicKey) {
+	pub(super) fn set_their_base_keys_and_first_per_commitment_point(&mut self, their_htlc_base_key: &PublicKey, their_delayed_payment_base_key: &PublicKey, idx: u64, per_commitment_point: &PublicKey) {
 		self.their_htlc_base_key = Some(their_htlc_base_key.clone());
 		self.their_delayed_payment_base_key = Some(their_delayed_payment_base_key.clone());
+		self.their_cur_revocation_points = Some((idx, *per_commitment_point, None));
+		//TODO: (ariard) + first_per_commitment_point
 	}
 
 	pub(super) fn set_their_to_self_delay(&mut self, their_to_self_delay: u16) {
@@ -1023,7 +1021,7 @@ impl ChannelMonitor {
 				let revocation_point_option =
 					if revocation_points.0 == commitment_number { Some(&revocation_points.1) }
 					else if let Some(point) = revocation_points.2.as_ref() {
-						if revocation_points.0 == commitment_number + 1 { Some(point) } else if revocation_points.0 == commitment_number - 1 { Some(point) } else { None }
+						if revocation_points.0 == commitment_number + 1 { Some(point) } else { None }
 					} else { None };
 				if let Some(revocation_point) = revocation_point_option {
 					let (revocation_pubkey, b_htlc_key) = match self.key_storage {
