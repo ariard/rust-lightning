@@ -7501,7 +7501,7 @@ mod tests {
 			match $event[$event_idx] {
 				Event::SpendableOutputs { ref outputs } => {
 					match outputs[$output_idx] {
-						SpendableOutputDescriptor::DynamicOutput { ref outpoint, ref local_delayedkey, ref witness_script, ref to_self_delay } => {
+						SpendableOutputDescriptor::DynamicOutput { ref outpoint, ref key, ref witness_script, ref to_self_delay } => {
 							let input = TxIn {
 								previous_output: outpoint.clone(),
 								script_sig: Script::new(),
@@ -7518,14 +7518,25 @@ mod tests {
 								input: vec![input],
 								output: vec![output],
 							};
-							let sighash = Message::from_slice(&bip143::SighashComponents::new(&spend_tx).sighash_all(&spend_tx.input[0], witness_script, $value)[..]).unwrap();
 							let secp_ctx = Secp256k1::new();
-							let local_delaysig = secp_ctx.sign(&sighash, local_delayedkey);
-							spend_tx.input[0].witness.push(local_delaysig.serialize_der(&secp_ctx).to_vec());
-							spend_tx.input[0].witness[0].push(SigHashType::All as u8);
-							spend_tx.input[0].witness.push(vec!(0));
-							spend_tx.input[0].witness.push(witness_script.clone().into_bytes());
-							spend_tx
+							if let Some(ref witness_script) = *witness_script {
+								let sighash = Message::from_slice(&bip143::SighashComponents::new(&spend_tx).sighash_all(&spend_tx.input[0], witness_script, $value)[..]).unwrap();
+								let local_delaysig = secp_ctx.sign(&sighash, key);
+								spend_tx.input[0].witness.push(local_delaysig.serialize_der(&secp_ctx).to_vec());
+								spend_tx.input[0].witness[0].push(SigHashType::All as u8);
+								spend_tx.input[0].witness.push(vec!(0));
+								spend_tx.input[0].witness.push(witness_script.clone().into_bytes());
+								spend_tx
+							} else {
+								let remotepubkey = PublicKey::from_secret_key(&secp_ctx, &key);
+								let witness_script = Address::p2pkh(&remotepubkey, Network::Testnet).script_pubkey();
+								let sighash = Message::from_slice(&bip143::SighashComponents::new(&spend_tx).sighash_all(&spend_tx.input[0], &witness_script, $value)[..]).unwrap();
+								let remotesig = secp_ctx.sign(&sighash, key);
+								spend_tx.input[0].witness.push(remotesig.serialize_der(&secp_ctx).to_vec());
+								spend_tx.input[0].witness[0].push(SigHashType::All as u8);
+								spend_tx.input[0].witness.push(remotepubkey.serialize().to_vec());
+								spend_tx
+							}
 						},
 						_ => panic!("Unexpected event"),
 					}
