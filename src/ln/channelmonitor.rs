@@ -1380,6 +1380,23 @@ impl ChannelMonitor {
 		(Vec::new(), Vec::new())
 	}
 
+	/// Generate a spendable output event when closing transaction get registered onchain, may send
+	/// back two descriptors, so even a false positive one for remote output to avoid watchtower mode
+	/// learning channel balance.
+	fn check_spend_closing_transaction(&self, tx: &Transaction, _height: u32) -> Vec<SpendableOutputDescriptor> {
+		if tx.input[0].sequence == 0xFFFFFFFF && tx.input[0].witness.last().unwrap().len() == 71 {
+			let mut spendable_outputs = Vec::with_capacity(tx.output.len());
+			for (idx, output) in tx.output.iter().enumerate() {
+				spendable_outputs.push(SpendableOutputDescriptor::StaticOutput {
+					outpoint: BitcoinOutPoint { txid: tx.txid(), vout: idx as u32 },
+					output: output.clone(),
+				});
+			}
+			return spendable_outputs;
+		}
+		Vec::new()
+	}
+
 	/// Used by ChannelManager deserialization to broadcast the latest local state if it's copy of
 	/// the Channel was out-of-date.
 	pub(super) fn get_latest_local_commitment_txn(&self) -> Vec<Transaction> {
@@ -1419,6 +1436,10 @@ impl ChannelMonitor {
 						let (remote_txn, mut outputs) = self.check_spend_local_transaction(tx, height);
 						spendable_outputs.append(&mut outputs);
 						txn = remote_txn;
+					}
+					if txn.is_empty() {
+						let mut outputs = self.check_spend_closing_transaction(tx, height);
+						spendable_outputs.append(&mut outputs);
 					}
 				} else {
 					if let Some(&(commitment_number, _)) = self.remote_commitment_txn_on_chain.get(&prevout.txid) {
