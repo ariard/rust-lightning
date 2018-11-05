@@ -7622,6 +7622,37 @@ mod tests {
 	}
 
 	#[test]
+	fn test_claim_on_remote_sizeable_push_msat() {
+		// Same test as precedent, just test on remote commitment tx, as per_commitment_point registration changes following you're funder/fundee and
+		// to_remote output is encumbered by a P2WPKH
+
+		let nodes = create_network(2);
+
+		let chan = create_announced_chan_between_nodes_with_value(&nodes, 0, 1, 100000, 99000000);
+		nodes[0].node.force_close_channel(&chan.2);
+		let events = nodes[0].node.get_and_clear_pending_msg_events();
+		match events[0] {
+			MessageSendEvent::BroadcastChannelUpdate { .. } => {},
+			_ => panic!("Unexpected event"),
+		}
+		let node_txn = nodes[0].tx_broadcaster.txn_broadcasted.lock().unwrap();
+		assert_eq!(node_txn.len(), 1);
+		check_spends!(node_txn[0], chan.3.clone());
+		assert_eq!(node_txn[0].output.len(), 2); // We can't force trimming of to_remote output as channel_reserve_satoshis block us to do so at channel opening
+
+		let header = BlockHeader { version: 0x20000000, prev_blockhash: Default::default(), merkle_root: Default::default(), time: 42, bits: 42, nonce: 42 };
+		nodes[1].chain_monitor.block_connected_with_filtering(&Block { header, txdata: vec![node_txn[0].clone()] }, 0);
+		let events = nodes[1].node.get_and_clear_pending_msg_events();
+		match events[0] {
+			MessageSendEvent::BroadcastChannelUpdate { .. } => {},
+			_ => panic!("Unexpected event"),
+		}
+		let events = nodes[1].chan_monitor.simple_monitor.get_and_clear_pending_events();
+		let spend_tx = check_dynamic_output!(events, 0, 0, node_txn[0].output[1].value);
+		check_spends!(spend_tx, node_txn[0].clone());
+	}
+
+	#[test]
 	fn test_static_spendable_outputs_preimage_tx() {
 		let nodes = create_network(2);
 
