@@ -2513,20 +2513,23 @@ impl ChainListener for ChannelManager {
 			let short_to_id = channel_state.short_to_id;
 			let pending_msg_events = channel_state.pending_msg_events;
 			channel_state.by_id.retain(|_, channel| {
-				let chan_res = channel.block_connected(header, height, txn_matched, indexes_of_txn_matched);
-				if let Ok(Some(funding_locked)) = chan_res {
-					pending_msg_events.push(events::MessageSendEvent::SendFundingLocked {
-						node_id: channel.get_their_node_id(),
-						msg: funding_locked,
-					});
-					if let Some(announcement_sigs) = self.get_announcement_sigs(channel) {
-						pending_msg_events.push(events::MessageSendEvent::SendAnnouncementSignatures {
+				let res = channel.block_connected(header, height, txn_matched, indexes_of_txn_matched);
+				if let Ok((chan_res, mut timed_out_pending_htlcs)) = res {
+					timed_out_htlcs.append(&mut timed_out_pending_htlcs);
+					if let Some(funding_locked) = chan_res {
+						pending_msg_events.push(events::MessageSendEvent::SendFundingLocked {
 							node_id: channel.get_their_node_id(),
-							msg: announcement_sigs,
+							msg: funding_locked,
 						});
+						if let Some(announcement_sigs) = self.get_announcement_sigs(channel) {
+							pending_msg_events.push(events::MessageSendEvent::SendAnnouncementSignatures {
+								node_id: channel.get_their_node_id(),
+								msg: announcement_sigs,
+							});
+						}
+						short_to_id.insert(channel.get_short_channel_id().unwrap(), channel.channel_id());
 					}
-					short_to_id.insert(channel.get_short_channel_id().unwrap(), channel.channel_id());
-				} else if let Err(e) = chan_res {
+				} else if let Err(e) = res {
 					pending_msg_events.push(events::MessageSendEvent::HandleError {
 						node_id: channel.get_their_node_id(),
 						action: e.action,
