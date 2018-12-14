@@ -1193,28 +1193,32 @@ impl Channel {
 		self.channel_monitor.provide_payment_preimage(&payment_hash_calc, &payment_preimage_arg);
 
 		if (self.channel_state & (ChannelState::AwaitingRemoteRevoke as u32 | ChannelState::PeerDisconnected as u32 | ChannelState::MonitorUpdateFailed as u32)) != 0 {
-			for pending_update in self.holding_cell_htlc_updates.iter() {
+			let mut need_update = true;
+			self.holding_cell_htlc_updates.retain(|pending_update| {
 				match pending_update {
 					&HTLCUpdateAwaitingACK::ClaimHTLC { htlc_id, .. } => {
 						if htlc_id_arg == htlc_id {
-							return Ok((None, None));
+							need_update = false;
 						}
+						true
 					},
 					&HTLCUpdateAwaitingACK::FailHTLC { htlc_id, .. } => {
 						if htlc_id_arg == htlc_id {
-							log_warn!(self, "Have preimage and want to fulfill HTLC with pending failure against channel {}", log_bytes!(self.channel_id()));
-							// TODO: We may actually be able to switch to a fulfill here, though its
-							// rare enough it may not be worth the complexity burden.
-							return Ok((None, Some(self.channel_monitor.clone())));
+							return false
 						}
+						true
 					},
-					_ => {}
+					_ => { true }
 				}
-			}
-			self.holding_cell_htlc_updates.push(HTLCUpdateAwaitingACK::ClaimHTLC {
-				payment_preimage: payment_preimage_arg, htlc_id: htlc_id_arg,
 			});
-			return Ok((None, Some(self.channel_monitor.clone())));
+			if need_update {
+				self.holding_cell_htlc_updates.push(HTLCUpdateAwaitingACK::ClaimHTLC {
+					payment_preimage: payment_preimage_arg, htlc_id: htlc_id_arg,
+				});
+				return Ok((None, Some(self.channel_monitor.clone())));
+			} else {
+				return Ok((None, None));
+			}
 		}
 
 		{
