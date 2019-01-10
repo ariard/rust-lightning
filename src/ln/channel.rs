@@ -867,7 +867,6 @@ impl Channel {
 			}
 		}
 
-
 		let value_to_self_msat: i64 = (self.value_to_self_msat - local_htlc_total_msat) as i64 + value_to_self_msat_offset;
 		let value_to_remote_msat: i64 = (self.channel_value_satoshis * 1000 - self.value_to_self_msat - remote_htlc_total_msat) as i64 - value_to_self_msat_offset;
 
@@ -897,6 +896,7 @@ impl Channel {
 
 		let value_to_a = if local { value_to_self } else { value_to_remote };
 		let value_to_b = if local { value_to_remote } else { value_to_self };
+
 
 		if value_to_a >= (dust_limit_satoshis as i64) {
 			txouts.push((TxOut {

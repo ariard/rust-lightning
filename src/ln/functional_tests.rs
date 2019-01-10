@@ -119,6 +119,27 @@ macro_rules! get_revoke_commit_msgs {
 	}
 }
 
+macro_rules! display_txn {
+	($txn: expr, $in: expr, $out: expr) => {
+		println!("[{}]", stringify!($txn));
+		for (idx, tx) in $txn.iter().enumerate() {
+			println!("tx[{}] : {} inputs {} outputs {}", idx, tx.txid(), tx.input.len(), tx.output.len());
+			if $in == true {
+				for (idx, inp) in tx.input.iter().enumerate() {
+					println!("	input[{}] : spending output {} from tx {} with witness size {}", idx, inp.previous_output.vout, inp.previous_output.txid, inp.witness.last().unwrap().len());
+				}
+			}
+			if $out == true {
+				for (idx, out) in tx.output.iter().enumerate() {
+					println!("	output[{}] : output encumbered by {} with amount {}", idx, out.script_pubkey, out.value);
+				}
+			}
+			println!("");
+		}
+		println!("");
+	}
+}
+
 macro_rules! get_event_msg {
 	($node: expr, $event_type: path, $node_id: expr) => {
 		{
@@ -6433,4 +6454,60 @@ fn test_onion_failure() {
 		msg.cltv_expiry = htlc_cltv;
 		msg.onion_routing_packet = onion_packet;
 	}, ||{}, true, Some(21), None);
+}
+
+
+const DUST_IN_FLIGHT: u32 = 20;
+#[test]
+fn dust_unbalancing {
+
+	let nodes = create_network(3);
+	create_announced_chan_between_nodes(&nodes, 0, 1);
+	let chan_1 = create_announced_chan_between_nodes(&nodes, 1, 2);
+
+	{
+		let cs_local_txn = nodes[2].node.channel_state.lock().unwrap().by_id.get(&chan_1.2).unwrap().last_local_commitment_txn.clone();
+		display_txn!(vec![cs_local_txn[0].clone()], true, true);
+	};
+	let mut preimage_vec = Vec::with_capacity(DUST_IN_FLIGHT as usize);
+	for i in 0..DUST_IN_FLIGHT {
+		preimage_vec.push(route_payment(&nodes[0], &[&nodes[1], &nodes[2]], 50000).0);
+	}
+	for i in 0..DUST_IN_FLIGHT {
+		assert!(nodes[2].node.claim_funds(preimage_vec[i as usize]));
+	}
+
+	check_added_monitors!(nodes[2], DUST_IN_FLIGHT as usize);
+
+	let cs_updates = get_htlc_update_msgs!(nodes[2], nodes[1].node.get_our_node_id());
+	for i in 0..DUST_IN_FLIGHT {
+		let fulfill = msgs::UpdateFulfillHTLC {
+			channel_id: chan_1.2,
+			htlc_id: i as u64,
+			payment_preimage: preimage_vec[i as usize],
+		};
+		nodes[1].node.handle_update_fulfill_htlc(&nodes[2].node.get_our_node_id(), &fulfill).unwrap();
+	}
+	let events = nodes[1].node.get_and_clear_pending_msg_events();	
+	assert_eq!(events.len(), 1);
+	match events[0] {
+		MessageSendEvent::UpdateHTLCs { ref node_id, updates: msgs::CommitmentUpdate { ref update_fulfill_htlcs, ref commitment_signed, .. } } => {
+			assert_eq!(*node_id, nodes[0].node.get_our_node_id());
+		}
+		_ => panic!("Unexpected event"),
+	}
+	nodes[1].node.handle_commitment_signed(&nodes[2].node.get_our_node_id(), &cs_updates.commitment_signed).unwrap();
+	check_added_monitors!(nodes[1], DUST_IN_FLIGHT as usize + 1);
+	let as_updates = get_revoke_commit_msgs!(nodes[1], nodes[2].node.get_our_node_id());
+	nodes[2].node.handle_revoke_and_ack(&nodes[1].node.get_our_node_id(), &as_updates.0).unwrap();
+	nodes[2].node.handle_commitment_signed(&nodes[1].node.get_our_node_id(), &as_updates.1).unwrap();
+	check_added_monitors!(nodes[2], 2);
+
+	{
+		let cs_local_txn = nodes[2].node.channel_state.lock().unwrap().by_id.get(&chan_1.2).unwrap().last_local_commitment_txn.clone();
+		println!("Target tx {}", cs_local_txn[0].txid());
+		display_txn!(vec![cs_local_txn[0].clone()], true, true);
+	};
+	let events = nodes[1].node.get_and_clear_pending_msg_events();	
+	let events = nodes[2].node.get_and_clear_pending_msg_events();	
 }
