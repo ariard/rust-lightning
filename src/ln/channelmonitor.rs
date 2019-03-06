@@ -1014,7 +1014,7 @@ impl ChannelMonitor {
 	/// HTLC-Success/HTLC-Timeout transactions.
 	/// Return updates for HTLC pending in the channel and failed automatically by the broadcast of
 	/// revoked remote commitment tx
-	fn check_spend_remote_transaction(&mut self, tx: &Transaction, height: u32) -> (Vec<Transaction>, (Sha256dHash, Vec<TxOut>), Vec<SpendableOutputDescriptor>, Vec<(HTLCSource, Option<PaymentPreimage>, PaymentHash)>)  {
+	fn check_spend_remote_transaction(&mut self, tx: &Transaction, commitment_txid: Sha256dHash, height: u32) -> (Vec<Transaction>, (Sha256dHash, Vec<TxOut>), Vec<SpendableOutputDescriptor>, Vec<(HTLCSource, Option<PaymentPreimage>, PaymentHash)>)  {
 		// Most secp and related errors trying to create keys means we have no hope of constructing
 		// a spend transaction...so we return no transactions to broadcast
 		let mut txn_to_broadcast = Vec::new();
@@ -1022,7 +1022,6 @@ impl ChannelMonitor {
 		let mut spendable_outputs = Vec::new();
 		let mut htlc_updated = Vec::new();
 
-		let commitment_txid = tx.txid(); //TODO: This is gonna be a performance bottleneck for watchtowers!
 		let per_commitment_option = self.remote_claimable_outpoints.get(&commitment_txid);
 
 		macro_rules! ignore_error {
@@ -1676,6 +1675,64 @@ impl ChannelMonitor {
 		None
 	}
 
+	/// Return true if spending tx wasn't expected, i.e isn't a previous/current local commitment tx,
+	/// a remote commitment tx (revoked or valid) or provided mutual close
+	fn check_rogue_tx(&self, tx: &Transaction, commitment_txid: Sha256dHash) {
+
+		macro_rules! verify_if_legit_commitment_tx {
+			($commitment_txid: expr, $expected_txid: expr) => {
+				if commitment_txid == $expected_txid {
+					return false;
+				}
+			}
+		}
+
+		macro_rules! verify_if_legit_local_htlc_tx {
+			($spend_tx: expr, $expected_tx: expr) => {
+				if $spend_tx.input[0].previous_output.txid == $expected_tx.txid {
+					for (htlc_output, _, _) in $expected_tx.htlc_outputs {
+						if let Some(index) == htlc_output.transaction_output_index {
+							if $spend_tx.input[0].previous_output.vout == index {
+								if $spend_tx.output.len() == 1 && $spend_tx.output[0].script_pubkey == chan_utils::get_revokeable_redeemscript($expected_tx.revocation_key, self.their_to_self_delay.unwrap(), $expected_tx.delayed_payment_key).to_v0_p2wsh() {
+									return false;
+								}
+								//enumerate all different ways of solving
+								// - remote by checking witness stack
+							}
+						}
+					}
+				}
+			}
+		}
+
+		if let &Some(ref local_tx) = &self.current_local_signed_commitment_tx {
+			verify_if_legit_commitment_tx!(commitment_txid, local_tx.txid);
+			verify_if_legit_local_htlc_tx!(tx, local_tx);
+		}
+		if let &Some(ref local_tx) = &self.prev_local_signed_commitment_tx {
+			verify_if_legit_commitment_tx!(commitment_txid, local_tx.txid);
+			verify_if_legit_local_htlc_tx!(tx, local_tx);
+		}
+
+		match self.key_storage {
+			Storage::Local { ref current_remote_commitment_txid, ref prev_remote_commitment_txid, .. } => {
+				if let Some(remote_commitment_txid) == current_remote_commitment_txid {
+					verify_if_legit_commitment_tx!(commitment_txid, remote_commitment_txid);
+					//verify_if_legit_remote_htlc_tx
+				}
+				if let Some(remote_commitment_txid) == prev_remote_commitment_txid {
+					verify_if_legit_commitment_tx!(commitment_txid, remote_commitment_txid);
+					//verify_if_legit_remote_htlc_tx
+				}
+				// verify_if_legit_justice_tx
+			}
+			Storage::Watchtower { .. } => {
+
+			}
+		}
+		return true;
+	}
+
 	/// Used by ChannelManager deserialization to broadcast the latest local state if it's copy of
 	/// the Channel was out-of-date.
 	pub(super) fn get_latest_local_commitment_txn(&self) -> Vec<Transaction> {
@@ -1697,6 +1754,15 @@ impl ChannelMonitor {
 		let mut watch_outputs = Vec::new();
 		let mut spendable_outputs = Vec::new();
 		let mut htlc_updated = Vec::new();
+		let funding_txo = match self.key_storage {
+			Storage::Local { ref funding_info, .. } => {
+				funding_info.clone()
+			}
+			Storage::Watchtower { .. } => {
+				unimplemented!();
+			}
+		};
+		let mut commitment_txid = None;
 		for tx in txn_matched {
 			if tx.input.len() == 1 {
 				// Assuming our keys were not leaked (in which case we're screwed no matter what),
@@ -1705,16 +1771,9 @@ impl ChannelMonitor {
 				// filters.
 				let prevout = &tx.input[0].previous_output;
 				let mut txn: Vec<Transaction> = Vec::new();
-				let funding_txo = match self.key_storage {
-					Storage::Local { ref funding_info, .. } => {
-						funding_info.clone()
-					}
-					Storage::Watchtower { .. } => {
-						unimplemented!();
-					}
-				};
 				if funding_txo.is_none() || (prevout.txid == funding_txo.as_ref().unwrap().0.txid && prevout.vout == funding_txo.as_ref().unwrap().0.index as u32) {
-					let (remote_txn, new_outputs, mut spendable_output, mut updated) = self.check_spend_remote_transaction(tx, height);
+					commitment_txid = Some(tx.txid()); //TODO: This is gonna be a performance bottleneck for watchtowers
+					let (remote_txn, new_outputs, mut spendable_output, mut updated) = self.check_spend_remote_transaction(tx, *commitment_txid.as_ref().unwrap(), height);
 					txn = remote_txn;
 					spendable_outputs.append(&mut spendable_output);
 					if !new_outputs.1.is_empty() {
@@ -1750,6 +1809,9 @@ impl ChannelMonitor {
 				for tx in txn.iter() {
 					broadcaster.broadcast_transaction(tx);
 				}
+			}
+			if tx.input.len() > 1 || self.check_rogue_tx(tx, commitment_txid.unwrap()) {
+				log_error!(self, "Got a rogue tx, YOUR KEYS HAVE LEAKED !!");
 			}
 			// While all commitment/HTLC-Success/HTLC-Timeout transactions have one input, HTLCs
 			// can also be resolved in a few other ways which can have more than one output. Thus,
