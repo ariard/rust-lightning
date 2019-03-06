@@ -4115,6 +4115,7 @@ fn test_dynamic_spendable_outputs_local_htlc_timeout_tx() {
 
 #[test]
 fn test_static_output_closing_tx() {
+	// BOLT5 : In the case of a mutual close, a node need not do anything else, as it has already agreed to the output, which is sent to its specified scriptpubkey
 	let nodes = create_network(2);
 
 	let chan = create_announced_chan_between_nodes(&nodes, 0, 1);
