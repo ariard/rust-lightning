@@ -327,6 +327,32 @@ struct LocalSignedTx {
 	htlc_outputs: Vec<(HTLCOutputInCommitment, Option<(Signature, Signature)>, Option<HTLCSource>)>,
 }
 
+#[derive(Clone, PartialEq)]
+enum TxMaterial {
+	Revoked {
+		script: Script,
+		pubkey: Option<PublicKey>,
+		key: SecretKey,
+		is_htlc: bool,
+	}
+}
+
+/// Upon discovering of some classes of onchain tx by ChannelMonitor, we may have to take actions on it 
+/// once they mature to enough confirmations (HTLC_FAIL_ANTI_REORG_DELAY)
+#[derive(Clone)]
+enum OnchainEvent {
+	/// Outpoint under claim process by our own tx, at maturation we remote it from our_claim_txn_waiting_first_conf
+	Claim {
+		outpoint: BitcoinOutPoint,
+	},
+	/// HTLC output getting solved by a timeout, at maturation we pass upstream payment source information to solve
+	/// inbound HTLC in backward channel. Note, in case of preimage, we pass info to upstream without delay as we can
+	/// only win from it, so it's never an OnchainEvent
+	HTLCUpdate {
+		htlc_update: (HTLCSource, PaymentHash),
+	},
+}
+
 const SERIALIZATION_VERSION: u8 = 1;
 const MIN_SERIALIZATION_VERSION: u8 = 1;
 
@@ -377,7 +403,9 @@ pub struct ChannelMonitor {
 
 	destination_script: Script,
 
-	htlc_updated_waiting_threshold_conf: HashMap<u32, Vec<(HTLCSource, Option<PaymentPreimage>, PaymentHash)>>,
+	our_claim_txn_waiting_first_conf: HashMap<BitcoinOutPoint, (u32, (TxMaterial, u64), u64)>,
+
+	onchain_events_waiting_threshold_conf: HashMap<u32, Vec<OnchainEvent>>,
 
 	// We simply modify last_block_hash in Channel's block_connected so that serialization is
 	// consistent but hopefully the users' copy handles block_connected in a consistent way.
@@ -409,7 +437,8 @@ impl PartialEq for ChannelMonitor {
 			self.current_local_signed_commitment_tx != other.current_local_signed_commitment_tx ||
 			self.payment_preimages != other.payment_preimages ||
 			self.destination_script != other.destination_script ||
-			self.htlc_updated_waiting_threshold_conf != other.htlc_updated_waiting_threshold_conf
+			self.our_claim_txn_waiting_first_conf != other.our_claim_txn_waiting_first_conf ||
+			self.onchain_events_waiting_threshold_conf != other.onchain_events_waiting_threshold_conf
 		{
 			false
 		} else {
@@ -459,7 +488,9 @@ impl ChannelMonitor {
 			payment_preimages: HashMap::new(),
 			destination_script: destination_script,
 
-			htlc_updated_waiting_threshold_conf: HashMap::new(),
+			our_claim_txn_waiting_first_conf: HashMap::new(),
+
+			onchain_events_waiting_threshold_conf: HashMap::new(),
 
 			last_block_hash: Default::default(),
 			secp_ctx: Secp256k1::new(),
@@ -948,14 +979,43 @@ impl ChannelMonitor {
 		self.last_block_hash.write(writer)?;
 		self.destination_script.write(writer)?;
 
-		writer.write_all(&byte_utils::be64_to_array(self.htlc_updated_waiting_threshold_conf.len() as u64))?;
-		for (ref target, ref updates) in self.htlc_updated_waiting_threshold_conf.iter() {
+		writer.write_all(&byte_utils::be64_to_array(self.our_claim_txn_waiting_first_conf.len() as u64))?;
+		for (ref outpoint, claim_tx_data) in self.our_claim_txn_waiting_first_conf.iter() {
+			outpoint.write(writer)?;
+			writer.write_all(&byte_utils::be32_to_array(claim_tx_data.0))?;
+			match (claim_tx_data.1).0 {
+				TxMaterial::Revoked { ref script, ref pubkey, ref key, ref is_htlc } => {
+					writer.write_all(&[0; 1])?;
+					script.write(writer)?;
+					pubkey.write(writer)?:	
+					writer.write_all(&key[..])?;
+					if is_htlc {
+						writer.write_all(&[0; 1])?;
+					} else {
+						writer.write_all(&[1; 1])?;
+					}
+				},
+			}
+			writer.write_all(&byte_utils::be64_to_array((claim_tx_data.1).1))?;
+			writer.write_all(&byte_utils::be64_to_array(claim_tx_data.2))?;
+		}
+
+		writer.write_all(&byte_utils::be64_to_array(self.onchain_events_waiting_threshold_conf.len() as u64))?;
+		for (ref target, ref events) in self.onchain_events_waiting_threshold_conf.iter() {
 			writer.write_all(&byte_utils::be32_to_array(**target))?;
-			writer.write_all(&byte_utils::be64_to_array(updates.len() as u64))?;
-			for ref update in updates.iter() {
-				update.0.write(writer)?;
-				update.1.write(writer)?;
-				update.2.write(writer)?;
+			writer.write_all(&byte_utils::be64_to_array(events.len() as u64))?;
+			for ref ev in events.iter() {
+				match ev {
+					OnchainEvent::Claim { outpoint } => {
+						writer.write_all(&[0; 1])?;
+						outpoint.write(writer)?;
+					},
+					OnchainEvent::HTLCUpdate { htlc_update } => { 
+						writer.write_all(&[1; 1])?;
+						htlc_update.0.write(writer)?;
+						htlc_update.1.write(writer)?;
+					}
+				}
 			}
 		}
 
@@ -1078,7 +1138,7 @@ impl ChannelMonitor {
 			let mut total_value = 0;
 			let mut values = Vec::new();
 			let mut inputs = Vec::new();
-			let mut htlc_idxs = Vec::new();
+			let mut output_datas = Vec::new();
 
 			for (idx, outp) in tx.output.iter().enumerate() {
 				if outp.script_pubkey == revokeable_p2wsh {
@@ -1091,7 +1151,11 @@ impl ChannelMonitor {
 						sequence: 0xfffffffd,
 						witness: Vec::new(),
 					});
-					htlc_idxs.push(None);
+					if let Some(&their_to_self_delay) = self.their_to_self_delay.as_ref() {
+						output_datas.push((None, Some(height + their_to_self_delay as u32), outp.value));
+					} else {
+						output_datas.push((None, None, outp.value));
+					}
 					values.push(outp.value);
 					total_value += outp.value;
 				} else if Some(&outp.script_pubkey) == local_payment_p2wpkh.as_ref() {
@@ -1106,7 +1170,7 @@ impl ChannelMonitor {
 			macro_rules! sign_input {
 				($sighash_parts: expr, $input: expr, $htlc_idx: expr, $amount: expr) => {
 					{
-						let (sig, redeemscript) = match self.key_storage {
+						let (sig, redeemscript, revocation_key) = match self.key_storage {
 							Storage::Local { ref revocation_base_key, .. } => {
 								let redeemscript = if $htlc_idx.is_none() { revokeable_redeemscript.clone() } else {
 									let htlc = &per_commitment_option.unwrap()[$htlc_idx.unwrap()].0;
@@ -1114,7 +1178,7 @@ impl ChannelMonitor {
 								};
 								let sighash = hash_to_message!(&$sighash_parts.sighash_all(&$input, &redeemscript, $amount)[..]);
 								let revocation_key = ignore_error!(chan_utils::derive_private_revocation_key(&self.secp_ctx, &per_commitment_key, &revocation_base_key));
-								(self.secp_ctx.sign(&sighash, &revocation_key), redeemscript)
+								(self.secp_ctx.sign(&sighash, &revocation_key), redeemscript, revocation_key)
 							},
 							Storage::Watchtower { .. } => {
 								unimplemented!();
@@ -1127,7 +1191,8 @@ impl ChannelMonitor {
 						} else {
 							$input.witness.push(revocation_pubkey.serialize().to_vec());
 						}
-						$input.witness.push(redeemscript.into_bytes());
+						$input.witness.push(redeemscript.clone().into_bytes());
+						(redeemscript, revocation_key)
 					}
 				}
 			}
@@ -1154,7 +1219,7 @@ impl ChannelMonitor {
 						};
 						if htlc.cltv_expiry > height + CLTV_SHARED_CLAIM_BUFFER {
 							inputs.push(input);
-							htlc_idxs.push(Some(idx));
+							output_datas.push((Some(idx), Some(htlc.cltv_expiry), htlc.amount_msat));
 							values.push(tx.output[transaction_output_index as usize].value);
 							total_value += htlc.amount_msat / 1000;
 						} else {
@@ -1168,7 +1233,9 @@ impl ChannelMonitor {
 								}),
 							};
 							let sighash_parts = bip143::SighashComponents::new(&single_htlc_tx);
-							sign_input!(sighash_parts, single_htlc_tx.input[0], Some(idx), htlc.amount_msat / 1000);
+							let (redeemscript, revocation_key) = sign_input!(sighash_parts, single_htlc_tx.input[0], Some(idx), htlc.amount_msat / 1000);
+							assert_eq!(single_htlc_tx.input.len(), 1);
+							self.our_claim_txn_waiting_first_conf.insert(single_htlc_tx.input[0].previous_output.clone(), (htlc.cltv_expiry - HTLC_FAIL_TIMEOUT_BLOCKS, (TxMaterial::Revoked { script: redeemscript, pubkey: revocation_pubkey, key: revocation_key }, htlc.amount_msat / 1000), 0)); //TODO: - last fee
 							txn_to_broadcast.push(single_htlc_tx);
 						}
 					}
@@ -1187,14 +1254,21 @@ impl ChannelMonitor {
 							for &(ref htlc, ref source_option) in outpoints.iter() {
 								if let &Some(ref source) = source_option {
 									log_trace!(self, "Failing HTLC with payment_hash {} from {} remote commitment tx due to broadcast of revoked remote commitment transaction, waiting confirmation until {} height", log_bytes!(htlc.payment_hash.0), $commitment_tx, height + HTLC_FAIL_ANTI_REORG_DELAY - 1);
-									match self.htlc_updated_waiting_threshold_conf.entry(height + HTLC_FAIL_ANTI_REORG_DELAY - 1) {
+									match self.onchain_events_waiting_threshold_conf.entry(height + HTLC_FAIL_ANTI_REORG_DELAY - 1) {
 										hash_map::Entry::Occupied(mut entry) => {
 											let e = entry.get_mut();
-											e.retain(|ref update| update.0 != **source);
-											e.push(((**source).clone(), None, htlc.payment_hash.clone()));
+											e.retain(|ref event| {
+												match event {
+													OnchainEvent::HTLCUpdate { htlc_update } => {
+														return htlc_update.0 != **source
+													},
+													_ => return true
+												}
+											});
+											e.push(OnchainEvent::HTLCUpdate { htlc_update: ((**source).clone(), htlc.payment_hash.clone())});
 										}
 										hash_map::Entry::Vacant(entry) => {
-											entry.insert(vec![((**source).clone(), None, htlc.payment_hash.clone())]);
+											entry.insert(vec![OnchainEvent::HTLCUpdate { htlc_update: ((**source).clone(), htlc.payment_hash.clone())}]);
 										}
 									}
 								}
@@ -1228,9 +1302,12 @@ impl ChannelMonitor {
 			let mut values_drain = values.drain(..);
 			let sighash_parts = bip143::SighashComponents::new(&spend_tx);
 
-			for (input, htlc_idx) in spend_tx.input.iter_mut().zip(htlc_idxs.iter()) {
+			for (input, output_data) in spend_tx.input.iter_mut().zip(output_datas.iter()) {
 				let value = values_drain.next().unwrap();
-				sign_input!(sighash_parts, input, htlc_idx, value);
+				let (redeemscript, revocation_key) = sign_input!(sighash_parts, input, output_data.0, value);
+				if output_data.1.is_some() {
+					self.our_claim_txn_waiting_first_conf.insert(input.previous_output.clone(), (output_data.1.unwrap() - HTLC_FAIL_TIMEOUT_BLOCKS, (TxMaterial::Revoked { script: redeemscript, pubkey: key: revocation_key }, output_data.2 / 1000), 0)); //TODO: - last fee
+				}
 			}
 
 			spendable_outputs.push(SpendableOutputDescriptor::StaticOutput {
@@ -1271,14 +1348,21 @@ impl ChannelMonitor {
 									}
 								}
 								log_trace!(self, "Failing HTLC with payment_hash {} from {} remote commitment tx due to broadcast of remote commitment transaction", log_bytes!(htlc.payment_hash.0), $commitment_tx);
-								match self.htlc_updated_waiting_threshold_conf.entry(height + HTLC_FAIL_ANTI_REORG_DELAY - 1) {
+								match self.onchain_events_waiting_threshold_conf.entry(height + HTLC_FAIL_ANTI_REORG_DELAY - 1) {
 									hash_map::Entry::Occupied(mut entry) => {
 										let e = entry.get_mut();
-										e.retain(|ref update| update.0 != **source);
-										e.push(((**source).clone(), None, htlc.payment_hash.clone()));
+										e.retain(|ref event| {
+											match event {
+												OnchainEvent::HTLCUpdate { htlc_update } => {
+													return htlc_update.0 != **source
+												},
+												_ => return true
+											}
+										});
+										e.push(OnchainEvent::HTLCUpdate { htlc_update: ((**source).clone(), htlc.payment_hash.clone())});
 									}
 									hash_map::Entry::Vacant(entry) => {
-										entry.insert(vec![((**source).clone(), None, htlc.payment_hash.clone())]);
+										entry.insert(vec![OnchainEvent::HTLCUpdate { htlc_update: ((**source).clone(), htlc.payment_hash.clone())}]);
 									}
 								}
 							}
@@ -1639,16 +1723,23 @@ impl ChannelMonitor {
 		let mut watch_outputs = Vec::new();
 
 		macro_rules! wait_threshold_conf {
-			($height: expr, $source: expr, $update: expr, $commitment_tx: expr, $payment_hash: expr) => {
+			($height: expr, $source: expr, $commitment_tx: expr, $payment_hash: expr) => {
 				log_trace!(self, "Failing HTLC with payment_hash {} from {} local commitment tx due to broadcast of transaction, waiting confirmation until {} height", log_bytes!($payment_hash.0), $commitment_tx, height + HTLC_FAIL_ANTI_REORG_DELAY - 1);
-				match self.htlc_updated_waiting_threshold_conf.entry($height + HTLC_FAIL_ANTI_REORG_DELAY - 1) {
+				match self.onchain_events_waiting_threshold_conf.entry($height + HTLC_FAIL_ANTI_REORG_DELAY - 1) {
 					hash_map::Entry::Occupied(mut entry) => {
 						let e = entry.get_mut();
-						e.retain(|ref update| update.0 != $source);
-						e.push(($source, $update, $payment_hash));
+						e.retain(|ref event| {
+							match event {
+								OnchainEvent::HTLCUpdate { htlc_update } => {
+									return htlc_update.0 != $source
+								},
+								_ => return true
+							}
+						});
+						e.push(OnchainEvent::HTLCUpdate { htlc_update: ($source, $payment_hash)});
 					}
 					hash_map::Entry::Vacant(entry) => {
-						entry.insert(vec![($source, $update, $payment_hash)]);
+						entry.insert(vec![OnchainEvent::HTLCUpdate { htlc_update: ($source, $payment_hash)}]);
 					}
 				}
 			}
@@ -1666,7 +1757,7 @@ impl ChannelMonitor {
 			for &(ref htlc, _, ref source) in &local_tx.htlc_outputs {
 				if htlc.transaction_output_index.is_none() {
 					if let &Some(ref source) = source {
-						wait_threshold_conf!(height, source.clone(), None, "lastest", htlc.payment_hash.clone());
+						wait_threshold_conf!(height, source.clone(), "lastest", htlc.payment_hash.clone());
 					}
 				}
 			}
@@ -1686,7 +1777,7 @@ impl ChannelMonitor {
 			for &(ref htlc, _, ref source) in &local_tx.htlc_outputs {
 				if htlc.transaction_output_index.is_none() {
 					if let &Some(ref source) = source {
-						wait_threshold_conf!(height, source.clone(), None, "previous", htlc.payment_hash.clone());
+						wait_threshold_conf!(height, source.clone(), "previous", htlc.payment_hash.clone());
 					}
 				}
 			}
@@ -1809,6 +1900,27 @@ impl ChannelMonitor {
 			if updated.len() > 0 {
 				htlc_updated.append(&mut updated);
 			}
+			for inp in &tx.input {
+				if self.our_claim_txn_waiting_first_conf.contains_key(&inp.previous_output) {
+					match self.onchain_events_waiting_threshold_conf.entry(height + HTLC_FAIL_ANTI_REORG_DELAY) {
+						hash_map::Entry::Occupied(mut entry) => {
+							let e = entry.get_mut();
+							e.retain(|ref event| {
+								match event {
+									OnchainEvent::Claim { outpoint } => {
+										return *outpoint != inp.previous_output
+									},
+									_ => return true
+								}
+							});
+							e.push(OnchainEvent::Claim { outpoint: inp.previous_output.clone()});
+						}
+						hash_map::Entry::Vacant(entry) => {
+							entry.insert(vec![OnchainEvent::Claim { outpoint: inp.previous_output.clone()}]);
+						}
+					}
+				}
+			}
 		}
 		if let Some(ref cur_local_tx) = self.current_local_signed_commitment_tx {
 			if self.would_broadcast_at_height(height) {
@@ -1837,10 +1949,53 @@ impl ChannelMonitor {
 				}
 			}
 		}
-		if let Some(updates) = self.htlc_updated_waiting_threshold_conf.remove(&height) {
-			for update in updates {
-				log_trace!(self, "HTLC {} failure update has get enough confirmation to be pass upstream", log_bytes!((update.2).0));
-				htlc_updated.push(update);
+		if let Some(events) = self.onchain_events_waiting_threshold_conf.remove(&height) {
+			for ev in events {
+				match ev {
+					OnchainEvent::Claim { outpoint } => {
+						self.our_claim_txn_waiting_first_conf.remove(&outpoint);
+					},
+					OnchainEvent::HTLCUpdate { htlc_update } => {
+						log_trace!(self, "HTLC {} failure update has get enough confirmation to be pass upstream", log_bytes!((htlc_update.1).0));
+						htlc_updated.push((htlc_update.0, None, htlc_update.1));
+					},
+				}
+			}
+		}
+		for (pending_outpoint, claim_tx_data) in self.our_claim_txn_waiting_first_conf.iter_mut() {
+			if claim_tx_data.0 == height {
+				let bumped_tx = Transaction {
+					version: 2,
+					lock_time: 0,	
+					input: vec![TxIn {
+						previous_output: pending_outpoint.clone(), 	
+						script_sig: Script::new(),
+						sequence: 0xfffffffd,
+						witness: Vec::new(),
+					}],
+					output: vec![TxOut {
+						script_pubkey: self.destination_script.clone(),
+						value: (claim_tx_data.1).1, //TODO: bump fee, need feeestimation in ChannelMonitor first
+					}],
+				};
+				let sighash_parts = bip143::SighashComponents::new(&bumped_tx);
+				match (claim_tx_data.1).0 {
+					TxMaterial::Revoked { script, revocation_pubkey, revocation_key, is_htlc } => {
+						let sighash = hash_to_message!(&sighash_parts.sighash_all(&bumped_tx.input[0], &script, bumped_tx.output[0].value)[..]);
+						let sig = self.secp_ctx.sign(&sighash, &revocation_key);
+						bumped_tx[0].input.witness.push(sig.serialize_der().to_vec());
+						bumped_tx[0].input.witness.push(SigHashType::All as u8);
+						if is_htlc {
+							bumped_tx[0].input.witness.push(revocation_pubkey.unwrap().clone().serialize().to_vec());
+						} else  {
+							bumped_tx[0].input.witness.push(vec!(1));
+						}
+						bumped_tx[0].input.witness.push(script.clone().into_bytes());
+					},
+					_ => unimplemented!(),
+				}
+				broadcaster.broadcast_transaction(&bumped_tx);
+				claim_tx_data.3 = 0 //TODO: new fee
 			}
 		}
 		self.last_block_hash = block_hash.clone();
@@ -1848,8 +2003,10 @@ impl ChannelMonitor {
 	}
 
 	fn block_disconnected(&mut self, height: u32, block_hash: &Sha256dHash) {
-		if let Some(_) = self.htlc_updated_waiting_threshold_conf.remove(&(height + HTLC_FAIL_ANTI_REORG_DELAY - 1)) {
-			//We discard htlc update there as failure-trigger tx (revoked commitment tx, non-revoked commitment tx, HTLC-timeout tx) has been disconnected
+		if let Some(_) = self.onchain_events_waiting_threshold_conf.remove(&(height + HTLC_FAIL_ANTI_REORG_DELAY - 1)) {
+			//We may discard:
+			//- htlc update there as failure-trigger tx (revoked commitment tx, non-revoked commitment tx, HTLC-timeout tx) has been disconnected
+			//- our claim tx on a commitment tx output
 		}
 		self.last_block_hash = block_hash.clone();
 	}
@@ -2031,14 +2188,21 @@ impl ChannelMonitor {
 					htlc_updated.push((source, Some(payment_preimage), payment_hash));
 				} else {
 					log_trace!(self, "Failing HTLC with payment_hash {} timeout by a spend tx, waiting confirmation until {} height", log_bytes!(payment_hash.0), height + HTLC_FAIL_ANTI_REORG_DELAY - 1);
-					match self.htlc_updated_waiting_threshold_conf.entry(height + HTLC_FAIL_ANTI_REORG_DELAY - 1) {
+					match self.onchain_events_waiting_threshold_conf.entry(height + HTLC_FAIL_ANTI_REORG_DELAY - 1) {
 						hash_map::Entry::Occupied(mut entry) => {
 							let e = entry.get_mut();
-							e.retain(|ref update| update.0 != source);
-							e.push((source, None, payment_hash.clone()));
+							e.retain(|ref event| {
+								match event {
+									OnchainEvent::HTLCUpdate { htlc_update } => {
+										return htlc_update.0 != source
+									},
+									_ => return true
+								}
+							});
+							e.push(OnchainEvent::HTLCUpdate { htlc_update: (source, payment_hash)});
 						}
 						hash_map::Entry::Vacant(entry) => {
-							entry.insert(vec![(source, None, payment_hash)]);
+							entry.insert(vec![OnchainEvent::HTLCUpdate { htlc_update: (source, payment_hash)}]);
 						}
 					}
 				}
@@ -2260,19 +2424,57 @@ impl<R: ::std::io::Read> ReadableArgs<R, Arc<Logger>> for (Sha256dHash, ChannelM
 		let last_block_hash: Sha256dHash = Readable::read(reader)?;
 		let destination_script = Readable::read(reader)?;
 
+		let our_claim_txn_waiting_first_conf_len: u64 = Readable::read(reader)?;
+		let mut our_claim_txn_waiting_first_conf = HashMap::with_capacity(cmp::min(our_claim_txn_waiting_first_conf_len as usize, MAX_ALLOC_SIZE / 128));
+		for _ in 0..our_claim_txn_waiting_first_conf_len {
+			let outpoint = Readable::read(reader)?;
+			let height_target = Readable::read(reader)?;
+			let tx_material = match <u8 as Readable<R>>::read(reader)? {
+				0 => {
+					let script = Readable::read(reader)?;
+					let pubkey = Readable::read(reader)?;
+					let key = Readable::read(reader)?;
+					let is_htlc = Readable::read(reader)?;
+					TxMaterial::Revoked {
+						script,
+						pubkey,
+						key,
+						is_htlc
+					}
+				},
+				_ => return Err(DecodeError::InvalidValue),
+			};
+			let amount = Readable::read(reader)?;
+			let last_fee = Readable::read(reader)?;
+			our_claim_txn_waiting_first_conf.insert(outpoint, (height_target, (tx_material, amount), last_fee));
+		}
+
 		let waiting_threshold_conf_len: u64 = Readable::read(reader)?;
-		let mut htlc_updated_waiting_threshold_conf = HashMap::with_capacity(cmp::min(waiting_threshold_conf_len as usize, MAX_ALLOC_SIZE / 128));
+		let mut onchain_events_waiting_threshold_conf = HashMap::with_capacity(cmp::min(waiting_threshold_conf_len as usize, MAX_ALLOC_SIZE / 128));
 		for _ in 0..waiting_threshold_conf_len {
 			let height_target = Readable::read(reader)?;
-			let updates_len: u64 = Readable::read(reader)?;
-			let mut updates = Vec::with_capacity(cmp::min(updates_len as usize, MAX_ALLOC_SIZE / 128));
-			for _ in 0..updates_len {
-				let htlc_source = Readable::read(reader)?;
-				let preimage = Readable::read(reader)?;
-				let hash = Readable::read(reader)?;
-				updates.push((htlc_source, preimage, hash));
+			let events_len: u64 = Readable::read(reader)?;
+			let mut events = Vec::with_capacity(cmp::min(events_len as usize, MAX_ALLOC_SIZE / 128));
+			for _ in 0..events_len {
+				let ev = match <u8 as Readable<R>>::read(reader)? {
+					0 => {
+						let outpoint = Readable::read(reader)?;
+						OnchainEvent::Claim {
+							outpoint
+						}
+					},
+					1 => {
+						let htlc_source = Readable::read(reader)?;
+						let hash = Readable::read(reader)?;
+						OnchainEvent::HTLCUpdate {
+							htlc_update: (htlc_source, hash)
+						}
+					},
+					_ => return Err(DecodeError::InvalidValue),
+				};
+				events.push(ev);
 			}
-			htlc_updated_waiting_threshold_conf.insert(height_target, updates);
+			onchain_events_waiting_threshold_conf.insert(height_target, events);
 		}
 
 		Ok((last_block_hash.clone(), ChannelMonitor {
@@ -2299,7 +2501,9 @@ impl<R: ::std::io::Read> ReadableArgs<R, Arc<Logger>> for (Sha256dHash, ChannelM
 
 			destination_script,
 
-			htlc_updated_waiting_threshold_conf,
+			our_claim_txn_waiting_first_conf,
+
+			onchain_events_waiting_threshold_conf,
 
 			last_block_hash,
 			secp_ctx,
