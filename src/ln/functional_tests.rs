@@ -5699,3 +5699,85 @@ fn test_sweep_outbound_htlc_failure_update() {
 	do_test_sweep_outbound_htlc_failure_update(false, false);
 	do_test_sweep_outbound_htlc_failure_update(true, false);
 }
+
+
+// aggregation
+// multiple bumping rounds
+// 2 different bumping heuristic
+// min relay fee isn't enough
+
+#[test]
+fn test_bump_penalty_txn_on_commitment() {
+	// In case of penalty txn with too low feerates for getting into mempools, RBF-bump them to be sure 
+	// we're able to claim outputs on revoked commitment transaction before timelocks expiration
+
+	let nodes = create_network(2);
+
+	let chan = create_announced_chan_between_nodes_with_value(&nodes, 0, 1, 1000000, 59000000);
+	let payment_preimage = route_payment(&nodes[0], &vec!(&nodes[1])[..], 3000000).0;
+	route_payment(&nodes[1], &vec!(&nodes[0])[..], 3000000).0;
+	let revoked_local_txn = nodes[0].node.channel_state.lock().unwrap().by_id.get(&chan.2).unwrap().last_local_commitment_txn.clone();
+	assert_eq!(revoked_local_txn[0].output.len(), 4);
+	assert_eq!(revoked_local_txn[0].input.len(), 1);
+	assert_eq!(revoked_local_txn[0].input[0].previous_output.txid, chan.3.txid());
+	let revoked_txid = revoked_local_txn[0].txid();
+
+	let mut penalty_amount = 0;
+	for outp in revoked_local_txn[0].output.iter() {
+		if outp.script_pubkey.is_v0_p2wsh() {
+			penalty_amount += outp.value;
+		}
+	}
+
+	claim_payment(&nodes[0], &vec!(&nodes[1])[..], payment_preimage);
+	let header = BlockHeader { version: 0x20000000, prev_blockhash: Default::default(), merkle_root: Default::default(), time: 42, bits: 42, nonce: 42 };
+	nodes[1].chain_monitor.block_connected_with_filtering(&Block { header, txdata: vec![revoked_local_txn[0].clone()] }, 1);
+
+	let previous_penalty_txid;
+	let feerate_1;
+	{
+		let mut node_txn = nodes[1].tx_broadcaster.txn_broadcasted.lock().unwrap();
+		assert_eq!(node_txn.len(), 2);
+		assert_eq!(node_txn[0], node_txn[1]);
+		assert_eq!(node_txn[0].input.len(), 3); // Penalty txn claims to_local, offered_htlc and received_htlc outputs
+		assert_eq!(node_txn[0].output.len(), 1);
+		check_spends!(node_txn[0], revoked_local_txn[0].clone());
+		println!("Amount {} vs {}", penalty_amount, node_txn[0].output[0].value);
+		let fee_1 = penalty_amount - node_txn[0].output[0].value;
+		feerate_1 = fee_1 * 1000 / node_txn[0].get_weight();
+		previous_penalty_txid = node_txn[0].txid();
+		node_txn.clear();
+	};
+
+	connect_blocks(&nodes[1].chain_monitor, 6, 1,  true, header.bitcoin_hash());
+	let mut previous_penalties_txid = Vec::new();
+	let mut feerate_2;
+	{
+		let mut node_txn = nodes[1].tx_broadcaster.txn_broadcasted.lock().unwrap();
+		assert_eq!(node_txn.len(), 5);
+		for tx in node_txn.iter() {
+			if tx.input[0].previous_output.txid == revoked_txid {
+				let txid = tx.txid();
+				// Verify new bumped tx is different from last claiming transaction
+				assert_ne!(previous_penalty_txid, txid);
+				let vout = tx.input[0].previous_output.vout as usize;
+				println!("Amount {} vs {}", revoked_local_txn[0].output[vout].value, tx.output[0].value);
+				let fee_2 = revoked_local_txn[0].output[vout].value - tx.output[0].value;
+				feerate_2 = fee_2 * 1000 / tx.get_weight();
+				// Verify 25% bump heuristic
+				assert!(feerate_2 * 100 >= feerate_1 * 125);
+				previous_penalties_txid.push(txid);
+				println!("New feerate {} vs Old feerate {}", feerate_2, feerate_1);
+			}
+		}
+		node_txn.clear();
+	}
+	assert!(false);
+
+
+	//TODO: verify with heuristic HighPriority spike
+
+	//TODO: shuffle min relay fee
+
+	//TODO: test bumping txn on revoked HTLC-Success/HTLC-Timeout
+}
