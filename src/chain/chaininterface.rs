@@ -109,6 +109,11 @@ pub trait FeeEstimator: Sync + Send {
 	///  * satoshis-per-byte * 250
 	///  * ceil(satoshis-per-kbyte / 4)
 	fn get_est_sat_per_1000_weight(&self, confirmation_target: ConfirmationTarget) -> u64;
+	/// Gets satoshis of minimum relay fee required per 1000 Weight-Units.
+	///
+	/// Give us back the minimum relay fee setup by node mempool. It's should be accounted in generic fee
+	/// computation but in case of RBF we need more granularity on fee composition.
+	fn get_min_relay_sat_per_1000_weight(&self) -> u64;
 }
 
 /// Utility for tracking registered txn/outpoints and checking for matches

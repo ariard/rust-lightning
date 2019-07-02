@@ -3236,7 +3236,7 @@ fn test_no_txn_manager_serialize_deserialize() {
 	let mut chan_0_monitor_serialized = test_utils::TestVecWriter(Vec::new());
 	nodes[0].chan_monitor.simple_monitor.monitors.lock().unwrap().iter().next().unwrap().1.write_for_disk(&mut chan_0_monitor_serialized).unwrap();
 
-	nodes[0].chan_monitor = Arc::new(test_utils::TestChannelMonitor::new(nodes[0].chain_monitor.clone(), nodes[0].tx_broadcaster.clone(), Arc::new(test_utils::TestLogger::new()), Arc::new(test_utils::TestFeeEstimator { sat_per_kw: 253 })));
+	nodes[0].chan_monitor = Arc::new(test_utils::TestChannelMonitor::new(nodes[0].chain_monitor.clone(), nodes[0].tx_broadcaster.clone(), Arc::new(test_utils::TestLogger::new()), Arc::new(test_utils::TestFeeEstimator { sat_per_kw: 253, min_relay_sat_per_kw: 0})));
 	let mut chan_0_monitor_read = &chan_0_monitor_serialized.0[..];
 	let (_, chan_0_monitor) = <(Sha256dHash, ChannelMonitor)>::read(&mut chan_0_monitor_read, Arc::new(test_utils::TestLogger::new())).unwrap();
 	assert!(chan_0_monitor_read.is_empty());
@@ -3250,7 +3250,7 @@ fn test_no_txn_manager_serialize_deserialize() {
 		<(Sha256dHash, ChannelManager)>::read(&mut nodes_0_read, ChannelManagerReadArgs {
 			default_config: config,
 			keys_manager,
-			fee_estimator: Arc::new(test_utils::TestFeeEstimator { sat_per_kw: 253 }),
+			fee_estimator: Arc::new(test_utils::TestFeeEstimator { sat_per_kw: 253, min_relay_sat_per_kw: 0}),
 			monitor: nodes[0].chan_monitor.clone(),
 			chain_monitor: nodes[0].chain_monitor.clone(),
 			tx_broadcaster: nodes[0].tx_broadcaster.clone(),
@@ -3302,7 +3302,7 @@ fn test_simple_manager_serialize_deserialize() {
 	let mut chan_0_monitor_serialized = test_utils::TestVecWriter(Vec::new());
 	nodes[0].chan_monitor.simple_monitor.monitors.lock().unwrap().iter().next().unwrap().1.write_for_disk(&mut chan_0_monitor_serialized).unwrap();
 
-	nodes[0].chan_monitor = Arc::new(test_utils::TestChannelMonitor::new(nodes[0].chain_monitor.clone(), nodes[0].tx_broadcaster.clone(), Arc::new(test_utils::TestLogger::new()), Arc::new(test_utils::TestFeeEstimator { sat_per_kw: 253 })));
+	nodes[0].chan_monitor = Arc::new(test_utils::TestChannelMonitor::new(nodes[0].chain_monitor.clone(), nodes[0].tx_broadcaster.clone(), Arc::new(test_utils::TestLogger::new()), Arc::new(test_utils::TestFeeEstimator { sat_per_kw: 253, min_relay_sat_per_kw: 0})));
 	let mut chan_0_monitor_read = &chan_0_monitor_serialized.0[..];
 	let (_, chan_0_monitor) = <(Sha256dHash, ChannelMonitor)>::read(&mut chan_0_monitor_read, Arc::new(test_utils::TestLogger::new())).unwrap();
 	assert!(chan_0_monitor_read.is_empty());
@@ -3315,7 +3315,7 @@ fn test_simple_manager_serialize_deserialize() {
 		<(Sha256dHash, ChannelManager)>::read(&mut nodes_0_read, ChannelManagerReadArgs {
 			default_config: UserConfig::new(),
 			keys_manager,
-			fee_estimator: Arc::new(test_utils::TestFeeEstimator { sat_per_kw: 253 }),
+			fee_estimator: Arc::new(test_utils::TestFeeEstimator { sat_per_kw: 253, min_relay_sat_per_kw: 0}),
 			monitor: nodes[0].chan_monitor.clone(),
 			chain_monitor: nodes[0].chain_monitor.clone(),
 			tx_broadcaster: nodes[0].tx_broadcaster.clone(),
@@ -3362,7 +3362,7 @@ fn test_manager_serialize_deserialize_inconsistent_monitor() {
 		node_0_monitors_serialized.push(writer.0);
 	}
 
-	nodes[0].chan_monitor = Arc::new(test_utils::TestChannelMonitor::new(nodes[0].chain_monitor.clone(), nodes[0].tx_broadcaster.clone(), Arc::new(test_utils::TestLogger::new()), Arc::new(test_utils::TestFeeEstimator { sat_per_kw: 253 })));
+	nodes[0].chan_monitor = Arc::new(test_utils::TestChannelMonitor::new(nodes[0].chain_monitor.clone(), nodes[0].tx_broadcaster.clone(), Arc::new(test_utils::TestLogger::new()), Arc::new(test_utils::TestFeeEstimator { sat_per_kw: 253, min_relay_sat_per_kw: 0})));
 	let mut node_0_monitors = Vec::new();
 	for serialized in node_0_monitors_serialized.iter() {
 		let mut read = &serialized[..];
@@ -3376,7 +3376,7 @@ fn test_manager_serialize_deserialize_inconsistent_monitor() {
 	let (_, nodes_0_deserialized) = <(Sha256dHash, ChannelManager)>::read(&mut nodes_0_read, ChannelManagerReadArgs {
 		default_config: UserConfig::new(),
 		keys_manager,
-		fee_estimator: Arc::new(test_utils::TestFeeEstimator { sat_per_kw: 253 }),
+		fee_estimator: Arc::new(test_utils::TestFeeEstimator { sat_per_kw: 253, min_relay_sat_per_kw: 0}),
 		monitor: nodes[0].chan_monitor.clone(),
 		chain_monitor: nodes[0].chain_monitor.clone(),
 		tx_broadcaster: nodes[0].tx_broadcaster.clone(),

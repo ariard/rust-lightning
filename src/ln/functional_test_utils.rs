@@ -839,7 +839,7 @@ pub fn create_network(node_count: usize) -> Vec<Node> {
 
 	for i in 0..node_count {
 		let logger: Arc<Logger> = Arc::new(test_utils::TestLogger::with_id(format!("node {}", i)));
-		let feeest = Arc::new(test_utils::TestFeeEstimator { sat_per_kw: 253 });
+		let feeest = Arc::new(test_utils::TestFeeEstimator { sat_per_kw: 253, min_relay_sat_per_kw: 0});
 		let chain_monitor = Arc::new(chaininterface::ChainWatchInterfaceUtil::new(Network::Testnet, Arc::clone(&logger)));
 		let tx_broadcaster = Arc::new(test_utils::TestBroadcaster{txn_broadcasted: Mutex::new(Vec::new())});
 		let mut seed = [0; 32];

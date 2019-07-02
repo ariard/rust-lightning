@@ -33,10 +33,14 @@ impl Writer for TestVecWriter {
 
 pub struct TestFeeEstimator {
 	pub sat_per_kw: u64,
+	pub min_relay_sat_per_kw: u64
 }
 impl chaininterface::FeeEstimator for TestFeeEstimator {
 	fn get_est_sat_per_1000_weight(&self, _confirmation_target: ConfirmationTarget) -> u64 {
 		self.sat_per_kw
+	}
+	fn get_min_relay_sat_per_1000_weight(&self) -> u64 {
+		self.min_relay_sat_per_kw
 	}
 }
 

@@ -3994,11 +3994,15 @@ mod tests {
 	use std::sync::Arc;
 
 	struct TestFeeEstimator {
-		fee_est: u64
+		fee_est: u64,
+		minrelayfee: u64
 	}
 	impl FeeEstimator for TestFeeEstimator {
 		fn get_est_sat_per_1000_weight(&self, _: ConfirmationTarget) -> u64 {
 			self.fee_est
+		}
+		fn get_min_relay_sat_per_1000_weight(&self) -> u64 {
+			self.minrelayfee
 		}
 	}
 
@@ -4034,7 +4038,7 @@ mod tests {
 	#[test]
 	fn outbound_commitment_test() {
 		// Test vectors from BOLT 3 Appendix C:
-		let feeest = TestFeeEstimator{fee_est: 15000};
+		let feeest = TestFeeEstimator{fee_est: 15000, minrelayfee: 0};
 		let logger : Arc<Logger> = Arc::new(test_utils::TestLogger::new());
 		let secp_ctx = Secp256k1::new();
 
