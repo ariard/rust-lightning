@@ -2110,9 +2110,6 @@ impl ChannelMonitor {
 				}
 			}
 		}
-		for claim in pending_claims {
-			self.our_claim_txn_waiting_first_conf.insert(claim.0, claim.1);
-		}
 		if let Some(events) = self.onchain_events_waiting_threshold_conf.remove(&height) {
 			for ev in events {
 				match ev {
@@ -2126,7 +2123,29 @@ impl ChannelMonitor {
 				}
 			}
 		}
-		//TODO: iter on buffered TxMaterial in our_claim_txn_waiting_first_conf, if block timer is expired generate a bumped claim tx (RBF or CPFP accordingly)
+		let mut bumped_txn = Vec::new();
+		let mut pending_claims = Vec::new();
+		{
+			let mut bump_candidates = Vec::new();
+			for (claimed_outpoint, claim_tx_data) in self.our_claim_txn_waiting_first_conf.iter() {
+				if claim_tx_data.0 == height {
+					bump_candidates.push((claimed_outpoint, claim_tx_data));
+				}
+			}
+			for candidate in bump_candidates {
+				if let Some((new_timer, mut bumped_tx, feerate)) = self.bump_claim_tx(candidate.0, (candidate.1).0, &(candidate.1).1, (candidate.1).2, fee_estimator) {
+					pending_claims.push((*candidate.0, (new_timer, (candidate.1).1.clone() , feerate)));
+					bumped_txn.append(&mut vec![bumped_tx]);
+				}
+			}
+		}
+		for tx in pending_claims {
+			log_trace!(self, "Outpoint {}:{} is under claiming process, if it doesn't succeed, a bumped claiming txn is going to be broadcast at height {}", (tx.0).vout, (tx.0).txid, (tx.1).0);
+			self.our_claim_txn_waiting_first_conf.insert(tx.0, tx.1);
+		}
+		for tx in bumped_txn {
+			broadcaster.broadcast_transaction(&tx)
+		}
 		self.last_block_hash = block_hash.clone();
 		(watch_outputs, spendable_outputs, htlc_updated)
 	}
@@ -2338,6 +2357,99 @@ impl ChannelMonitor {
 			}
 		}
 		htlc_updated
+	}
+
+        /// Lightning security model (i.e being able to redeem/timeout HTLC or penalize coutnerparty onchain) lays on the assumption of claim transactions getting confirmed before timelock expiration
+	/// (CSV or CLTV following cases). In case of high-fee spikes, claim tx may stuck in the mempool, so you need to bump its feerate quickly using Replace-By-Fee or Child-Pay-For-Parent.
+	// TODO: we may use smarter heuristics to aggregate-at-bumping if we add timelock in cached materials
+	fn bump_claim_tx(&self, claimed_outpoint: &BitcoinOutPoint, old_timer: u32, tx_material: &TxMaterial, old_feerate: u64, fee_estimator: &FeeEstimator) -> Option<(u32, Transaction, u64)> {
+		let mut bumped_tx = Transaction {
+			version: 2,
+			lock_time: 0,
+			input: vec![TxIn {
+				previous_output: claimed_outpoint.clone(),
+				script_sig: Script::new(),
+				sequence: 0xfffffffd,
+				witness: Vec::new(),
+			}],
+			output: vec![TxOut {
+				script_pubkey: self.destination_script.clone(),
+				value: 0
+			}],
+		};
+
+		macro_rules! RBF_bump {
+			($amount: expr, $old_feerate: expr, $fee_estimator: expr, $predicted_weight: expr, $outpoint: expr, $output: expr) => {
+				{
+					// If old feerate inferior to actual one given back by Fee Estimator, use it to compute new fee...
+					let new_fee = if $old_feerate < $fee_estimator.get_est_sat_per_1000_weight(ConfirmationTarget::HighPriority) {
+						let mut value = $amount;
+						if subtract_high_prio_fee!(self, $fee_estimator, value, $predicted_weight, $outpoint.txid) {
+							$amount - value
+						} else {
+							log_trace!(self, "Can't new-estimation bump claiming on {} output {} from {}, amount {} is too small", $output, $outpoint.vout, $outpoint.txid, $amount);
+							return None;
+						}
+					// ...else just increase the previous feerate by 25% (because that's a nice number)
+					} else {
+						let fee = $old_feerate * $predicted_weight / 750;
+						if $amount <= fee {
+							log_trace!(self, "Can't 25% bump claiming on {} output {} from {}, amount {} is too small", $output, $outpoint.vout, $outpoint.txid, $amount);
+							return None;
+						}
+						fee
+					};
+
+					let previous_fee = $old_feerate * $predicted_weight / 1000;
+					let min_relay_fee = $fee_estimator.get_min_relay_sat_per_1000_weight() * $predicted_weight / 1000;
+					// BIP 125 Opt-in Full Replace-by-Fee Signaling
+					// 	* 3. The replacement transaction pays an absolute fee of at least the sum paid by the original transactions.
+					//	* 4. The replacement transaction must also pay for its own bandwidth at or above the rate set by the node's minimum relay fee setting.
+					let new_fee = if new_fee < previous_fee + min_relay_fee {
+						new_fee + previous_fee + min_relay_fee - new_fee
+					} else {
+						new_fee
+					};
+					Some((new_fee, new_fee * 1000 / $predicted_weight))
+				}
+			}
+		}
+
+		// We set the new timer to 3 blocks, which is nearly HighConfirmation target
+		let new_timer = old_timer + 3; //TODO: we may even be more aggressive there by decreasing timer delay at each bumping
+
+		match tx_material {
+			TxMaterial::Revoked { ref script, ref pubkey, ref key, ref is_htlc, ref amount } => {
+				let predicted_weight = bumped_tx.get_weight() + Self::get_witnesses_weight(if !is_htlc { &[InputDescriptors::RevokedOutput] } else if script.len() == OFFERED_HTLC_SCRIPT_WEIGHT { &[InputDescriptors::RevokedOfferedHTLC] } else if script.len() == ACCEPTED_HTLC_SCRIPT_WEIGHT { &[InputDescriptors::RevokedReceivedHTLC] } else { &[] });
+				if let Some((new_fee, new_feerate)) = RBF_bump!(*amount, old_feerate, fee_estimator, predicted_weight, claimed_outpoint, "revoked") {
+					bumped_tx.output[0].value = amount - new_fee;
+					let sighash_parts = bip143::SighashComponents::new(&bumped_tx);
+					let sighash = hash_to_message!(&sighash_parts.sighash_all(&bumped_tx.input[0], &script, bumped_tx.output[0].value)[..]);
+					let sig = self.secp_ctx.sign(&sighash, &key);
+					bumped_tx.input[0].witness.push(sig.serialize_der().to_vec());
+					bumped_tx.input[0].witness[0].push(SigHashType::All as u8);
+					if *is_htlc {
+						bumped_tx.input[0].witness.push(pubkey.unwrap().clone().serialize().to_vec());
+					} else {
+						bumped_tx.input[0].witness.push(vec!(1));
+					}
+					bumped_tx.input[0].witness.push(script.clone().into_bytes());
+					assert!(predicted_weight >= bumped_tx.get_weight());
+					log_trace!(self, "Going to broadcast bumped Penalty Transaction {} claiming revoked {} output {} from {} with new feerate {}", bumped_tx.txid(), if !is_htlc { "to_local" } else if script.len() == OFFERED_HTLC_SCRIPT_WEIGHT { "offered" } else if script.len() == ACCEPTED_HTLC_SCRIPT_WEIGHT { "received" } else { "" }, claimed_outpoint.vout, claimed_outpoint.txid, new_feerate);
+					return Some((new_timer, bumped_tx, new_feerate));
+				}
+			},
+			TxMaterial::RemoteHTLC { .. } => {
+				return None;
+			},
+			TxMaterial::LocalHTLC { .. } => {
+				//TODO : Given that Local Commitment Transaction and HTLC-Timeout/HTLC-Success are counter-signed by peer, we can't
+				// RBF them. Need a Lightning specs change and package relay modification :
+				// https://lists.linuxfoundation.org/pipermail/bitcoin-dev/2018-November/016518.html
+				return None;
+			},
+		}
+		None
 	}
 }
 
