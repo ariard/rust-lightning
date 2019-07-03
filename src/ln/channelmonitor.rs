@@ -2439,8 +2439,25 @@ impl ChannelMonitor {
 					return Some((new_timer, bumped_tx, new_feerate));
 				}
 			},
-			TxMaterial::RemoteHTLC { .. } => {
-				return None;
+			TxMaterial::RemoteHTLC { ref script, ref key, ref preimage, ref amount } => {
+				let predicted_weight = bumped_tx.get_weight() + Self::get_witnesses_weight(if preimage.is_some() { &[InputDescriptors::OfferedHTLC] } else { &[InputDescriptors::ReceivedHTLC] });
+				if let Some((new_fee, new_feerate)) = RBF_bump!(*amount, old_feerate, fee_estimator, predicted_weight, claimed_outpoint, "remote htlc") {
+					bumped_tx.output[0].value = amount - new_fee; 
+					let sighash_parts = bip143::SighashComponents::new(&bumped_tx);	
+					let sighash = hash_to_message!(&sighash_parts.sighash_all(&bumped_tx.input[0], &script, bumped_tx.output[0].value)[..]);
+					let sig = self.secp_ctx.sign(&sighash, &key);
+					bumped_tx.input[0].witness.push(sig.serialize_der().to_vec());
+					bumped_tx.input[0].witness[0].push(SigHashType::All as u8);
+					if let &Some(preimage) = preimage {
+						bumped_tx.input[0].witness.push(preimage.clone().0.to_vec());
+					} else {
+						bumped_tx.input[0].witness.push(vec![0]);
+					}
+					bumped_tx.input[0].witness.push(script.clone().into_bytes());
+					assert!(predicted_weight >= bumped_tx.get_weight());
+					log_info!(self, "Going to broadcast bumped Claim Transaction {} claiming remote htlc output {} from {} with new feerate {}", bumped_tx.txid(), claimed_outpoint.vout, claimed_outpoint.txid, new_feerate);
+					return Some((new_timer, bumped_tx, new_feerate));
+				}
 			},
 			TxMaterial::LocalHTLC { .. } => {
 				//TODO : Given that Local Commitment Transaction and HTLC-Timeout/HTLC-Success are counter-signed by peer, we can't
