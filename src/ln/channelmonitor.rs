@@ -1348,6 +1348,7 @@ impl ChannelMonitor {
 								let (redeemscript, revocation_key) = sign_input!(sighash_parts, single_htlc_tx.input[0], Some(idx), htlc.amount_msat / 1000);
 								assert!(predicted_weight >= single_htlc_tx.get_weight());
 								assert_eq!(single_htlc_tx.input.len(), 1);
+								log_trace!(self, "Outpoint {}:{} is under claiming process, if it doesn't succeed, a bumped claiming txn is going to be broadcast at height {}", single_htlc_tx.input[0].previous_output.vout, single_htlc_tx.input[1].previous_output.txid, height + 3);
 								self.our_claim_txn_waiting_first_conf.insert(single_htlc_tx.input[0].previous_output.clone(), (height + 3, TxMaterial::Revoked { script: redeemscript, pubkey: Some(revocation_pubkey), key: revocation_key, is_htlc: true, amount: htlc.amount_msat / 1000 }, fee_estimator.get_est_sat_per_1000_weight(ConfirmationTarget::HighPriority)));
 								txn_to_broadcast.push(single_htlc_tx);
 							}
@@ -1423,6 +1424,7 @@ impl ChannelMonitor {
 
 			for (input, info) in spend_tx.input.iter_mut().zip(inputs_info.iter()) {
 				let (redeemscript, revocation_key) = sign_input!(sighash_parts, input, info.0, info.1);
+				log_trace!(self, "Outpoint {}:{} is under claiming process, if it doesn't succeed, a bumped claiming txn is going to be broadcast at height {}", input.previous_output.vout, input.previous_output.txid, height + 3);
 				self.our_claim_txn_waiting_first_conf.insert(input.previous_output.clone(), (height + 3, TxMaterial::Revoked { script: redeemscript, pubkey: if info.0.is_some() { Some(revocation_pubkey) } else { None }, key: revocation_key, is_htlc: if info.0.is_some() { true } else { false }, amount: info.1 }, fee_estimator.get_est_sat_per_1000_weight(ConfirmationTarget::HighPriority)));
 			}
 			assert!(predicted_weight >= spend_tx.get_weight());
@@ -1607,6 +1609,7 @@ impl ChannelMonitor {
 											outpoint: BitcoinOutPoint { txid: single_htlc_tx.txid(), vout: 0 },
 											output: single_htlc_tx.output[0].clone(),
 										});
+										log_trace!(self, "Outpoint {}:{} is under claiming process, if it doesn't succeed, a bumped claiming txn is going to be broadcast at height {}", single_htlc_tx.input[0].previous_output.vout, single_htlc_tx.input[0].previous_output.txid, height + 3);
 										self.our_claim_txn_waiting_first_conf.insert(single_htlc_tx.input[0].previous_output.clone(), (height + 3, TxMaterial::RemoteHTLC { script: redeemscript, key: htlc_key, preimage: Some(*payment_preimage), amount: htlc.amount_msat / 1000 }, fee_estimator.get_est_sat_per_1000_weight(ConfirmationTarget::HighPriority)));
 										txn_to_broadcast.push(single_htlc_tx);
 									}
@@ -1664,6 +1667,7 @@ impl ChannelMonitor {
 
 					for (input, info) in spend_tx.input.iter_mut().zip(inputs_info.iter()) {
 						let (redeemscript, htlc_key) = sign_input!(sighash_parts, input, info.1, (info.0).0.to_vec());
+						log_trace!(self, "Outpoint {}:{} is under claiming process, if it doesn't succeed, a bumped claiming txn is going to be broadcast at height {}", input.previous_output.vout, input.previous_output.txid, height + 3);
 						self.our_claim_txn_waiting_first_conf.insert(input.previous_output.clone(), (height + 3, TxMaterial::RemoteHTLC { script: redeemscript, key: htlc_key, preimage: Some(*(info.0)), amount: info.1}, fee_estimator.get_est_sat_per_1000_weight(ConfirmationTarget::HighPriority)));
 					}
 					assert!(predicted_weight >= spend_tx.get_weight());
@@ -1766,6 +1770,7 @@ impl ChannelMonitor {
 			assert!(predicted_weight >= spend_tx.get_weight());
 			let outpoint = BitcoinOutPoint { txid: spend_tx.txid(), vout: 0 };
 			let output = spend_tx.output[0].clone();
+			log_trace!(self, "Outpoint {}:{} is under claiming process, if it doesn't succeed, a bumped claiming txn is going to be broadcast at height {}", spend_tx.input[0].previous_output.vout, spend_tx.input[0].previous_output.txid, height + 3);
 			self.our_claim_txn_waiting_first_conf.insert(spend_tx.input[0].previous_output.clone(), (height + 3, TxMaterial::Revoked { script: redeemscript, pubkey: None, key: revocation_key, is_htlc: false, amount: output.value as u64 }, fee_estimator.get_est_sat_per_1000_weight(ConfirmationTarget::HighPriority)));
 			(Some(spend_tx), Some(SpendableOutputDescriptor::StaticOutput { outpoint, output }))
 		} else { (None, None) }
@@ -1893,6 +1898,7 @@ impl ChannelMonitor {
 				spendable_outputs.append(&mut $updates.1);
 				watch_outputs.append(&mut $updates.2);
 				for claim in $updates.3 {
+					log_trace!(self, "Outpoint {}:{} is under claiming process, if it doesn't succeed, a bumped claiming txn is going to be broadcast at height {}", (claim.0).vout, (claim.0).txid, height + 3);
 					self.our_claim_txn_waiting_first_conf.insert(claim.0, claim.1);
 				}
 			}
