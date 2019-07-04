@@ -5749,31 +5749,50 @@ fn test_bump_penalty_txn_on_commitment() {
 		node_txn.clear();
 	};
 
-	connect_blocks(&nodes[1].chain_monitor, 6, 1,  true, header.bitcoin_hash());
-	let mut previous_penalties_txid = Vec::new();
-	let mut feerate_2;
+	connect_blocks(&nodes[1].chain_monitor, 4, 1,  true, header.bitcoin_hash());
+	let mut penalties_2 = HashMap::new();
+	let mut feerate_2 = 0;
 	{
 		let mut node_txn = nodes[1].tx_broadcaster.txn_broadcasted.lock().unwrap();
 		assert_eq!(node_txn.len(), 5);
-		for tx in node_txn.iter() {
+		for tx in node_txn.drain(..) {
 			if tx.input[0].previous_output.txid == revoked_txid {
 				let txid = tx.txid();
-				// Verify new bumped tx is different from last claiming transaction
+				// Verify new bumped tx is different from last claiming transaction, we don't want spurrious rebroadcast
 				assert_ne!(previous_penalty_txid, txid);
-				let vout = tx.input[0].previous_output.vout as usize;
-				println!("Amount {} vs {}", revoked_local_txn[0].output[vout].value, tx.output[0].value);
-				let fee_2 = revoked_local_txn[0].output[vout].value - tx.output[0].value;
+				let fee_2 = revoked_local_txn[0].output[tx.input[0].previous_output.vout as usize].value - tx.output[0].value;
 				feerate_2 = fee_2 * 1000 / tx.get_weight();
 				// Verify 25% bump heuristic
 				assert!(feerate_2 * 100 >= feerate_1 * 125);
-				previous_penalties_txid.push(txid);
-				println!("New feerate {} vs Old feerate {}", feerate_2, feerate_1);
+				penalties_2.insert(tx.input[0].previous_output, (txid, fee_2));
 			}
 		}
-		node_txn.clear();
 	}
 	assert!(false);
+	//assert_ne!(feerate_2, 0);
 
+	//connect_blocks(&nodes[1].chain_monitor, 3, 6, true, header.bitcoin_hash());
+	//let mut penalties_3 = HashMap::new();
+	//let mut feerate_3 = 0;
+	//{
+	//	let mut node_txn = nodes[1].tx_broadcaster.txn_broadcasted.lock().unwrap();
+	//	assert_eq!(node_txn.len(), 3);
+	//	for tx in node_txn.drain(..) {
+	//		if let Some(previous_data) = penalties_2.get(&tx.input[0].previous_output) {
+	//			let txid = tx.txid();
+	//			// Verify new bumped tx is different from any last claiming treansaction, we don't want spurrious rebroadcast
+	//			assert_ne!(previous_data.0, txid);
+	//			let fee_3 = revoked_local_txn[0].output[tx.input[0].previous_output.vout as usize].value - tx.output[0].value;
+	//			feerate_3 = fee_3 * 1000 / tx.get_weight();
+	//			// Verify 25% bump heuristic;
+	//			assert!(feerate_3 * 100 >= feerate_2 * 125);
+	//			penalties_3.insert(tx.input[0].previous_output, (txid, fee_3));
+	//		}
+	//	}
+	//}
+	//assert_ne!(feerate_2, 0);
+
+	//assert!(false);
 
 	//TODO: verify with heuristic HighPriority spike
 
