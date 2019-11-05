@@ -422,7 +422,7 @@ pub struct ChannelDetails {
 }
 
 macro_rules! handle_error {
-	($self: ident, $internal: expr) => {
+	($self: ident, $internal: expr, $their_node_id: expr) => {
 		match $internal {
 			Ok(msg) => Ok(msg),
 			Err(MsgHandleErrInternal { err, shutdown_finish }) => {
@@ -435,6 +435,10 @@ macro_rules! handle_error {
 						});
 					}
 				}
+				let mut channel_state = $self.channel_state.lock().unwrap();
+				log_error!($self, "Got Error because {}", err.err);
+				channel_state.pending_msg_events.push(events::MessageSendEvent::HandleError { node_id: $their_node_id, action: err.action.clone() });
+				// Return error in case higher-API need one
 				Err(err)
 			},
 		}
@@ -1137,20 +1141,9 @@ impl ChannelManager {
 			return Ok(());
 		};
 
-		match handle_error!(self, err) {
+		match handle_error!(self, err, route.hops.first().unwrap().pubkey) {
 			Ok(_) => unreachable!(),
-			Err(e) => {
-				if let msgs::ErrorAction::IgnoreError = e.action {
-				} else {
-					log_error!(self, "Got bad keys: {}!", e.err);
-					let mut channel_state = self.channel_state.lock().unwrap();
-					channel_state.pending_msg_events.push(events::MessageSendEvent::HandleError {
-						node_id: route.hops.first().unwrap().pubkey,
-						action: e.action,
-					});
-				}
-				Err(APIError::ChannelUnavailable { err: e.err })
-			},
+			Err(e) => { Err(APIError::ChannelUnavailable { err: e.err }) }
 		}
 	}
 
@@ -1180,19 +1173,11 @@ impl ChannelManager {
 					None => return
 				}
 			};
-			match handle_error!(self, res) {
+			match handle_error!(self, res, chan.get_their_node_id()) {
 				Ok(funding_msg) => {
 					(chan, funding_msg.0, funding_msg.1)
 				},
-				Err(e) => {
-					log_error!(self, "Got bad signatures: {}!", e.err);
-					let mut channel_state = self.channel_state.lock().unwrap();
-					channel_state.pending_msg_events.push(events::MessageSendEvent::HandleError {
-						node_id: chan.get_their_node_id(),
-						action: e.action,
-					});
-					return;
-				},
+				Err(_) => { return; }
 			}
 		};
 		// Because we have exclusive ownership of the channel here we can release the channel_state
@@ -1200,16 +1185,8 @@ impl ChannelManager {
 		if let Err(e) = self.monitor.add_update_monitor(chan_monitor.get_funding_txo().unwrap(), chan_monitor) {
 			match e {
 				ChannelMonitorUpdateErr::PermanentFailure => {
-					match handle_error!(self, Err(MsgHandleErrInternal::from_finish_shutdown("ChannelMonitor storage failure", *temporary_channel_id, chan.force_shutdown(), None))) {
-						Err(e) => {
-							log_error!(self, "Failed to store ChannelMonitor update for funding tx generation");
-							let mut channel_state = self.channel_state.lock().unwrap();
-							channel_state.pending_msg_events.push(events::MessageSendEvent::HandleError {
-								node_id: chan.get_their_node_id(),
-								action: e.action,
-							});
-							return;
-						},
+					match handle_error!(self, Err(MsgHandleErrInternal::from_finish_shutdown("ChannelMonitor storage failure", *temporary_channel_id, chan.force_shutdown(), None)), chan.get_their_node_id()) {
+						Err(_) => { return; },
 						Ok(()) => unreachable!(),
 					}
 				},
@@ -1431,18 +1408,9 @@ impl ChannelManager {
 		}
 
 		for (their_node_id, err) in handle_errors.drain(..) {
-			match handle_error!(self, err) {
+			match handle_error!(self, err, their_node_id) {
 				Ok(_) => {},
-				Err(e) => {
-					if let msgs::ErrorAction::IgnoreError = e.action {
-					} else {
-						let mut channel_state = self.channel_state.lock().unwrap();
-						channel_state.pending_msg_events.push(events::MessageSendEvent::HandleError {
-							node_id: their_node_id,
-							action: e.action,
-						});
-					}
-				},
+				Err(_) => {}
 			}
 		}
 
@@ -1657,18 +1625,9 @@ impl ChannelManager {
 			return;
 		};
 
-		match handle_error!(self, err) {
+		match handle_error!(self, err, their_node_id) {
 			Ok(_) => {},
-			Err(e) => {
-				if let msgs::ErrorAction::IgnoreError = e.action {
-				} else {
-					let mut channel_state = self.channel_state.lock().unwrap();
-					channel_state.pending_msg_events.push(events::MessageSendEvent::HandleError {
-						node_id: their_node_id,
-						action: e.action,
-					});
-				}
-			},
+			Err(_) => {},
 		}
 	}
 
@@ -2442,20 +2401,9 @@ impl ChannelManager {
 			return Ok(())
 		};
 
-		match handle_error!(self, err) {
+		match handle_error!(self, err, their_node_id) {
 			Ok(_) => unreachable!(),
-			Err(e) => {
-				if let msgs::ErrorAction::IgnoreError = e.action {
-				} else {
-					log_error!(self, "Got bad keys: {}!", e.err);
-					let mut channel_state = self.channel_state.lock().unwrap();
-					channel_state.pending_msg_events.push(events::MessageSendEvent::HandleError {
-						node_id: their_node_id,
-						action: e.action,
-					});
-				}
-				Err(APIError::APIMisuseError { err: e.err })
-			},
+			Err(e) => { Err(APIError::APIMisuseError { err: e.err })}
 		}
 	}
 }
@@ -2626,84 +2574,84 @@ impl ChainListener for ChannelManager {
 
 impl ChannelMessageHandler for ChannelManager {
 	//TODO: Handle errors and close channel (or so)
-	fn handle_open_channel(&self, their_node_id: &PublicKey, their_local_features: LocalFeatures, msg: &msgs::OpenChannel) -> Result<(), ErrorPacket> {
+	fn handle_open_channel(&self, their_node_id: &PublicKey, their_local_features: LocalFeatures, msg: &msgs::OpenChannel) {
 		let _ = self.total_consistency_lock.read().unwrap();
-		handle_error!(self, self.internal_open_channel(their_node_id, their_local_features, msg))
+		if let Err(_) = handle_error!(self, self.internal_open_channel(their_node_id, their_local_features, msg), *their_node_id) {}
 	}
 
-	fn handle_accept_channel(&self, their_node_id: &PublicKey, their_local_features: LocalFeatures, msg: &msgs::AcceptChannel) -> Result<(), ErrorPacket> {
+	fn handle_accept_channel(&self, their_node_id: &PublicKey, their_local_features: LocalFeatures, msg: &msgs::AcceptChannel) {
 		let _ = self.total_consistency_lock.read().unwrap();
-		handle_error!(self, self.internal_accept_channel(their_node_id, their_local_features, msg))
+		if let Err(_) = handle_error!(self, self.internal_accept_channel(their_node_id, their_local_features, msg), *their_node_id) {}
 	}
 
-	fn handle_funding_created(&self, their_node_id: &PublicKey, msg: &msgs::FundingCreated) -> Result<(), ErrorPacket> {
+	fn handle_funding_created(&self, their_node_id: &PublicKey, msg: &msgs::FundingCreated) {
 		let _ = self.total_consistency_lock.read().unwrap();
-		handle_error!(self, self.internal_funding_created(their_node_id, msg))
+		if let Err(_) = handle_error!(self, self.internal_funding_created(their_node_id, msg), *their_node_id) {}
 	}
 
-	fn handle_funding_signed(&self, their_node_id: &PublicKey, msg: &msgs::FundingSigned) -> Result<(), ErrorPacket> {
+	fn handle_funding_signed(&self, their_node_id: &PublicKey, msg: &msgs::FundingSigned) {
 		let _ = self.total_consistency_lock.read().unwrap();
-		handle_error!(self, self.internal_funding_signed(their_node_id, msg))
+		if let Err(_) = handle_error!(self, self.internal_funding_signed(their_node_id, msg), *their_node_id) {}
 	}
 
-	fn handle_funding_locked(&self, their_node_id: &PublicKey, msg: &msgs::FundingLocked) -> Result<(), ErrorPacket> {
+	fn handle_funding_locked(&self, their_node_id: &PublicKey, msg: &msgs::FundingLocked) {
 		let _ = self.total_consistency_lock.read().unwrap();
-		handle_error!(self, self.internal_funding_locked(their_node_id, msg))
+		if let Err(_) = handle_error!(self, self.internal_funding_locked(their_node_id, msg), *their_node_id) {}
 	}
 
-	fn handle_shutdown(&self, their_node_id: &PublicKey, msg: &msgs::Shutdown) -> Result<(), ErrorPacket> {
+	fn handle_shutdown(&self, their_node_id: &PublicKey, msg: &msgs::Shutdown) {
 		let _ = self.total_consistency_lock.read().unwrap();
-		handle_error!(self, self.internal_shutdown(their_node_id, msg))
+		if let Err(_) = handle_error!(self, self.internal_shutdown(their_node_id, msg), *their_node_id) {}
 	}
 
-	fn handle_closing_signed(&self, their_node_id: &PublicKey, msg: &msgs::ClosingSigned) -> Result<(), ErrorPacket> {
+	fn handle_closing_signed(&self, their_node_id: &PublicKey, msg: &msgs::ClosingSigned) {
 		let _ = self.total_consistency_lock.read().unwrap();
-		handle_error!(self, self.internal_closing_signed(their_node_id, msg))
+		if let Err(_) = handle_error!(self, self.internal_closing_signed(their_node_id, msg), *their_node_id) {}
 	}
 
-	fn handle_update_add_htlc(&self, their_node_id: &PublicKey, msg: &msgs::UpdateAddHTLC) -> Result<(), ErrorPacket> {
+	fn handle_update_add_htlc(&self, their_node_id: &PublicKey, msg: &msgs::UpdateAddHTLC) {
 		let _ = self.total_consistency_lock.read().unwrap();
-		handle_error!(self, self.internal_update_add_htlc(their_node_id, msg))
+		if let Err(_) = handle_error!(self, self.internal_update_add_htlc(their_node_id, msg), *their_node_id) {}
 	}
 
-	fn handle_update_fulfill_htlc(&self, their_node_id: &PublicKey, msg: &msgs::UpdateFulfillHTLC) -> Result<(), ErrorPacket> {
+	fn handle_update_fulfill_htlc(&self, their_node_id: &PublicKey, msg: &msgs::UpdateFulfillHTLC) {
 		let _ = self.total_consistency_lock.read().unwrap();
-		handle_error!(self, self.internal_update_fulfill_htlc(their_node_id, msg))
+		if let Err(_) = handle_error!(self, self.internal_update_fulfill_htlc(their_node_id, msg), *their_node_id) {}
 	}
 
-	fn handle_update_fail_htlc(&self, their_node_id: &PublicKey, msg: &msgs::UpdateFailHTLC) -> Result<(), ErrorPacket> {
+	fn handle_update_fail_htlc(&self, their_node_id: &PublicKey, msg: &msgs::UpdateFailHTLC) {
 		let _ = self.total_consistency_lock.read().unwrap();
-		handle_error!(self, self.internal_update_fail_htlc(their_node_id, msg))
+		if let Err(_) = handle_error!(self, self.internal_update_fail_htlc(their_node_id, msg), *their_node_id) {}
 	}
 
-	fn handle_update_fail_malformed_htlc(&self, their_node_id: &PublicKey, msg: &msgs::UpdateFailMalformedHTLC) -> Result<(), ErrorPacket> {
+	fn handle_update_fail_malformed_htlc(&self, their_node_id: &PublicKey, msg: &msgs::UpdateFailMalformedHTLC) {
 		let _ = self.total_consistency_lock.read().unwrap();
-		handle_error!(self, self.internal_update_fail_malformed_htlc(their_node_id, msg))
+		if let Err(_) = handle_error!(self, self.internal_update_fail_malformed_htlc(their_node_id, msg), *their_node_id) {}
 	}
 
-	fn handle_commitment_signed(&self, their_node_id: &PublicKey, msg: &msgs::CommitmentSigned) -> Result<(), ErrorPacket> {
+	fn handle_commitment_signed(&self, their_node_id: &PublicKey, msg: &msgs::CommitmentSigned) {
 		let _ = self.total_consistency_lock.read().unwrap();
-		handle_error!(self, self.internal_commitment_signed(their_node_id, msg))
+		if let Err(_) = handle_error!(self, self.internal_commitment_signed(their_node_id, msg), *their_node_id) {}
 	}
 
-	fn handle_revoke_and_ack(&self, their_node_id: &PublicKey, msg: &msgs::RevokeAndACK) -> Result<(), ErrorPacket> {
+	fn handle_revoke_and_ack(&self, their_node_id: &PublicKey, msg: &msgs::RevokeAndACK) {
 		let _ = self.total_consistency_lock.read().unwrap();
-		handle_error!(self, self.internal_revoke_and_ack(their_node_id, msg))
+		if let Err(_) = handle_error!(self, self.internal_revoke_and_ack(their_node_id, msg), *their_node_id) {}
 	}
 
-	fn handle_update_fee(&self, their_node_id: &PublicKey, msg: &msgs::UpdateFee) -> Result<(), ErrorPacket> {
+	fn handle_update_fee(&self, their_node_id: &PublicKey, msg: &msgs::UpdateFee) {
 		let _ = self.total_consistency_lock.read().unwrap();
-		handle_error!(self, self.internal_update_fee(their_node_id, msg))
+		if let Err(_) = handle_error!(self, self.internal_update_fee(their_node_id, msg), *their_node_id) {}
 	}
 
-	fn handle_announcement_signatures(&self, their_node_id: &PublicKey, msg: &msgs::AnnouncementSignatures) -> Result<(), ErrorPacket> {
+	fn handle_announcement_signatures(&self, their_node_id: &PublicKey, msg: &msgs::AnnouncementSignatures) {
 		let _ = self.total_consistency_lock.read().unwrap();
-		handle_error!(self, self.internal_announcement_signatures(their_node_id, msg))
+		if let Err(_) = handle_error!(self, self.internal_announcement_signatures(their_node_id, msg), *their_node_id) {}
 	}
 
-	fn handle_channel_reestablish(&self, their_node_id: &PublicKey, msg: &msgs::ChannelReestablish) -> Result<(), ErrorPacket> {
+	fn handle_channel_reestablish(&self, their_node_id: &PublicKey, msg: &msgs::ChannelReestablish) {
 		let _ = self.total_consistency_lock.read().unwrap();
-		handle_error!(self, self.internal_channel_reestablish(their_node_id, msg))
+		if let Err(_) = handle_error!(self, self.internal_channel_reestablish(their_node_id, msg), *their_node_id) {}
 	}
 
 	fn peer_disconnected(&self, their_node_id: &PublicKey, no_connection_possible: bool) {

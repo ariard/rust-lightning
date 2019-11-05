@@ -76,7 +76,7 @@ fn do_test_simple_monitor_temporary_update_fail(disconnect: bool) {
 	assert_eq!(events_2.len(), 1);
 	let payment_event = SendEvent::from_event(events_2.pop().unwrap());
 	assert_eq!(payment_event.node_id, nodes[1].node.get_our_node_id());
-	nodes[1].node.handle_update_add_htlc(&nodes[0].node.get_our_node_id(), &payment_event.msgs[0]).unwrap();
+	nodes[1].node.handle_update_add_htlc(&nodes[0].node.get_our_node_id(), &payment_event.msgs[0]);
 	commitment_signed_dance!(nodes[1], nodes[0], payment_event.commitment_msg, false);
 
 	expect_pending_htlcs_forwardable!(nodes[1]);
@@ -180,7 +180,7 @@ fn do_test_monitor_temporary_update_fail(disconnect_count: usize) {
 			assert!(update_fee.is_none());
 
 			if (disconnect_count & 16) == 0 {
-				nodes[0].node.handle_update_fulfill_htlc(&nodes[1].node.get_our_node_id(), &update_fulfill_htlcs[0]).unwrap();
+				nodes[0].node.handle_update_fulfill_htlc(&nodes[1].node.get_our_node_id(), &update_fulfill_htlcs[0]);
 				let events_3 = nodes[0].node.get_and_clear_pending_events();
 				assert_eq!(events_3.len(), 1);
 				match events_3[0] {
@@ -221,9 +221,9 @@ fn do_test_monitor_temporary_update_fail(disconnect_count: usize) {
 		let reestablish_2 = get_chan_reestablish_msgs!(nodes[1], nodes[0]);
 		assert_eq!(reestablish_2.len(), 1);
 
-		nodes[0].node.handle_channel_reestablish(&nodes[1].node.get_our_node_id(), &reestablish_2[0]).unwrap();
+		nodes[0].node.handle_channel_reestablish(&nodes[1].node.get_our_node_id(), &reestablish_2[0]);
 		let as_resp = handle_chan_reestablish_msgs!(nodes[0], nodes[1]);
-		nodes[1].node.handle_channel_reestablish(&nodes[0].node.get_our_node_id(), &reestablish_1[0]).unwrap();
+		nodes[1].node.handle_channel_reestablish(&nodes[0].node.get_our_node_id(), &reestablish_1[0]);
 		let bs_resp = handle_chan_reestablish_msgs!(nodes[1], nodes[0]);
 
 		assert!(as_resp.0.is_none());
@@ -243,10 +243,10 @@ fn do_test_monitor_temporary_update_fail(disconnect_count: usize) {
 		let reestablish_2 = get_chan_reestablish_msgs!(nodes[1], nodes[0]);
 		assert_eq!(reestablish_2.len(), 1);
 
-		nodes[0].node.handle_channel_reestablish(&nodes[1].node.get_our_node_id(), &reestablish_2[0]).unwrap();
+		nodes[0].node.handle_channel_reestablish(&nodes[1].node.get_our_node_id(), &reestablish_2[0]);
 		check_added_monitors!(nodes[0], 0);
 		let mut as_resp = handle_chan_reestablish_msgs!(nodes[0], nodes[1]);
-		nodes[1].node.handle_channel_reestablish(&nodes[0].node.get_our_node_id(), &reestablish_1[0]).unwrap();
+		nodes[1].node.handle_channel_reestablish(&nodes[0].node.get_our_node_id(), &reestablish_1[0]);
 		check_added_monitors!(nodes[1], 0);
 		let mut bs_resp = handle_chan_reestablish_msgs!(nodes[1], nodes[0]);
 
@@ -270,7 +270,7 @@ fn do_test_monitor_temporary_update_fail(disconnect_count: usize) {
 
 			assert!(as_resp.1.is_none());
 
-			nodes[0].node.handle_update_fulfill_htlc(&nodes[1].node.get_our_node_id(), &bs_resp.2.as_ref().unwrap().update_fulfill_htlcs[0]).unwrap();
+			nodes[0].node.handle_update_fulfill_htlc(&nodes[1].node.get_our_node_id(), &bs_resp.2.as_ref().unwrap().update_fulfill_htlcs[0]);
 			let events_3 = nodes[0].node.get_and_clear_pending_events();
 			assert_eq!(events_3.len(), 1);
 			match events_3[0] {
@@ -280,7 +280,7 @@ fn do_test_monitor_temporary_update_fail(disconnect_count: usize) {
 				_ => panic!("Unexpected event"),
 			}
 
-			nodes[0].node.handle_commitment_signed(&nodes[1].node.get_our_node_id(), &bs_resp.2.as_ref().unwrap().commitment_signed).unwrap();
+			nodes[0].node.handle_commitment_signed(&nodes[1].node.get_our_node_id(), &bs_resp.2.as_ref().unwrap().commitment_signed);
 			let as_resp_raa = get_event_msg!(nodes[0], MessageSendEvent::SendRevokeAndACK, nodes[1].node.get_our_node_id());
 			// No commitment_signed so get_event_msg's assert(len == 1) passes
 			check_added_monitors!(nodes[0], 1);
@@ -315,8 +315,8 @@ fn do_test_monitor_temporary_update_fail(disconnect_count: usize) {
 
 	assert_eq!(payment_event.node_id, nodes[1].node.get_our_node_id());
 
-	nodes[1].node.handle_update_add_htlc(&nodes[0].node.get_our_node_id(), &payment_event.msgs[0]).unwrap();
-	nodes[1].node.handle_commitment_signed(&nodes[0].node.get_our_node_id(), &payment_event.commitment_msg).unwrap();
+	nodes[1].node.handle_update_add_htlc(&nodes[0].node.get_our_node_id(), &payment_event.msgs[0]);
+	nodes[1].node.handle_commitment_signed(&nodes[0].node.get_our_node_id(), &payment_event.commitment_msg);
 	let bs_revoke_and_ack = get_event_msg!(nodes[1], MessageSendEvent::SendRevokeAndACK, nodes[0].node.get_our_node_id());
 	// nodes[1] is awaiting an RAA from nodes[0] still so get_event_msg's assert(len == 1) passes
 	check_added_monitors!(nodes[1], 1);
@@ -335,7 +335,7 @@ fn do_test_monitor_temporary_update_fail(disconnect_count: usize) {
 	let bs_second_commitment_update;
 
 	macro_rules! handle_bs_raa { () => {
-		nodes[0].node.handle_revoke_and_ack(&nodes[1].node.get_our_node_id(), &bs_revoke_and_ack).unwrap();
+		nodes[0].node.handle_revoke_and_ack(&nodes[1].node.get_our_node_id(), &bs_revoke_and_ack);
 		as_commitment_update = get_htlc_update_msgs!(nodes[0], nodes[1].node.get_our_node_id());
 		assert!(as_commitment_update.update_add_htlcs.is_empty());
 		assert!(as_commitment_update.update_fulfill_htlcs.is_empty());
@@ -346,7 +346,7 @@ fn do_test_monitor_temporary_update_fail(disconnect_count: usize) {
 	} }
 
 	macro_rules! handle_initial_raa { () => {
-		nodes[1].node.handle_revoke_and_ack(&nodes[0].node.get_our_node_id(), &initial_revoke_and_ack).unwrap();
+		nodes[1].node.handle_revoke_and_ack(&nodes[0].node.get_our_node_id(), &initial_revoke_and_ack);
 		bs_second_commitment_update = get_htlc_update_msgs!(nodes[1], nodes[0].node.get_our_node_id());
 		assert!(bs_second_commitment_update.update_add_htlcs.is_empty());
 		assert!(bs_second_commitment_update.update_fulfill_htlcs.is_empty());
@@ -410,21 +410,21 @@ fn do_test_monitor_temporary_update_fail(disconnect_count: usize) {
 		}
 	}
 
-	nodes[0].node.handle_commitment_signed(&nodes[1].node.get_our_node_id(), &bs_second_commitment_update.commitment_signed).unwrap();
+	nodes[0].node.handle_commitment_signed(&nodes[1].node.get_our_node_id(), &bs_second_commitment_update.commitment_signed);
 	let as_revoke_and_ack = get_event_msg!(nodes[0], MessageSendEvent::SendRevokeAndACK, nodes[1].node.get_our_node_id());
 	// No commitment_signed so get_event_msg's assert(len == 1) passes
 	check_added_monitors!(nodes[0], 1);
 
-	nodes[1].node.handle_commitment_signed(&nodes[0].node.get_our_node_id(), &as_commitment_update.commitment_signed).unwrap();
+	nodes[1].node.handle_commitment_signed(&nodes[0].node.get_our_node_id(), &as_commitment_update.commitment_signed);
 	let bs_second_revoke_and_ack = get_event_msg!(nodes[1], MessageSendEvent::SendRevokeAndACK, nodes[0].node.get_our_node_id());
 	// No commitment_signed so get_event_msg's assert(len == 1) passes
 	check_added_monitors!(nodes[1], 1);
 
-	nodes[1].node.handle_revoke_and_ack(&nodes[0].node.get_our_node_id(), &as_revoke_and_ack).unwrap();
+	nodes[1].node.handle_revoke_and_ack(&nodes[0].node.get_our_node_id(), &as_revoke_and_ack);
 	assert!(nodes[1].node.get_and_clear_pending_msg_events().is_empty());
 	check_added_monitors!(nodes[1], 1);
 
-	nodes[0].node.handle_revoke_and_ack(&nodes[1].node.get_our_node_id(), &bs_second_revoke_and_ack).unwrap();
+	nodes[0].node.handle_revoke_and_ack(&nodes[1].node.get_our_node_id(), &bs_second_revoke_and_ack);
 	assert!(nodes[0].node.get_and_clear_pending_msg_events().is_empty());
 	check_added_monitors!(nodes[0], 1);
 
@@ -482,7 +482,7 @@ fn test_monitor_update_fail_cs() {
 	check_added_monitors!(nodes[0], 1);
 
 	let send_event = SendEvent::from_event(nodes[0].node.get_and_clear_pending_msg_events().remove(0));
-	nodes[1].node.handle_update_add_htlc(&nodes[0].node.get_our_node_id(), &send_event.msgs[0]).unwrap();
+	nodes[1].node.handle_update_add_htlc(&nodes[0].node.get_our_node_id(), &send_event.msgs[0]);
 
 	*nodes[1].chan_monitor.update_ret.lock().unwrap() = Err(ChannelMonitorUpdateErr::TemporaryFailure);
 	if let msgs::ErrorPacket { err, action: msgs::ErrorAction::IgnoreError } = nodes[1].node.handle_commitment_signed(&nodes[0].node.get_our_node_id(), &send_event.commitment_msg).unwrap_err() {
@@ -500,7 +500,7 @@ fn test_monitor_update_fail_cs() {
 	match responses[0] {
 		MessageSendEvent::SendRevokeAndACK { ref msg, ref node_id } => {
 			assert_eq!(*node_id, nodes[0].node.get_our_node_id());
-			nodes[0].node.handle_revoke_and_ack(&nodes[1].node.get_our_node_id(), &msg).unwrap();
+			nodes[0].node.handle_revoke_and_ack(&nodes[1].node.get_our_node_id(), &msg);
 			check_added_monitors!(nodes[0], 1);
 		},
 		_ => panic!("Unexpected event"),
@@ -1396,11 +1396,11 @@ fn test_monitor_update_fail_claim() {
 	let mut events = nodes[2].node.get_and_clear_pending_msg_events();
 	assert_eq!(events.len(), 1);
 	let payment_event = SendEvent::from_event(events.pop().unwrap());
-	nodes[1].node.handle_update_add_htlc(&nodes[2].node.get_our_node_id(), &payment_event.msgs[0]).unwrap();
+	nodes[1].node.handle_update_add_htlc(&nodes[2].node.get_our_node_id(), &payment_event.msgs[0]);
 	commitment_signed_dance!(nodes[1], nodes[2], payment_event.commitment_msg, false, true);
 
 	let bs_fail_update = get_htlc_update_msgs!(nodes[1], nodes[2].node.get_our_node_id());
-	nodes[2].node.handle_update_fail_htlc(&nodes[1].node.get_our_node_id(), &bs_fail_update.update_fail_htlcs[0]).unwrap();
+	nodes[2].node.handle_update_fail_htlc(&nodes[1].node.get_our_node_id(), &bs_fail_update.update_fail_htlcs[0]);
 	commitment_signed_dance!(nodes[2], nodes[1], bs_fail_update.commitment_signed, false, true);
 
 	let msg_events = nodes[2].node.get_and_clear_pending_msg_events();
@@ -1565,8 +1565,8 @@ fn do_during_funding_monitor_fail(fail_on_generate: bool, restore_between_fails:
 	let mut nodes = create_network(2, &[None, None]);
 
 	nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 100000, 10001, 43).unwrap();
-	nodes[1].node.handle_open_channel(&nodes[0].node.get_our_node_id(), LocalFeatures::new(), &get_event_msg!(nodes[0], MessageSendEvent::SendOpenChannel, nodes[1].node.get_our_node_id())).unwrap();
-	nodes[0].node.handle_accept_channel(&nodes[1].node.get_our_node_id(), LocalFeatures::new(), &get_event_msg!(nodes[1], MessageSendEvent::SendAcceptChannel, nodes[0].node.get_our_node_id())).unwrap();
+	nodes[1].node.handle_open_channel(&nodes[0].node.get_our_node_id(), LocalFeatures::new(), &get_event_msg!(nodes[0], MessageSendEvent::SendOpenChannel, nodes[1].node.get_our_node_id()));
+	nodes[0].node.handle_accept_channel(&nodes[1].node.get_our_node_id(), LocalFeatures::new(), &get_event_msg!(nodes[1], MessageSendEvent::SendAcceptChannel, nodes[0].node.get_our_node_id()));
 
 	let (temporary_channel_id, funding_tx, funding_output) = create_funding_transaction(&nodes[0], 100000, 43);
 
@@ -1577,7 +1577,7 @@ fn do_during_funding_monitor_fail(fail_on_generate: bool, restore_between_fails:
 	check_added_monitors!(nodes[0], 1);
 
 	*nodes[1].chan_monitor.update_ret.lock().unwrap() = Err(ChannelMonitorUpdateErr::TemporaryFailure);
-	nodes[1].node.handle_funding_created(&nodes[0].node.get_our_node_id(), &get_event_msg!(nodes[0], MessageSendEvent::SendFundingCreated, nodes[1].node.get_our_node_id())).unwrap();
+	nodes[1].node.handle_funding_created(&nodes[0].node.get_our_node_id(), &get_event_msg!(nodes[0], MessageSendEvent::SendFundingCreated, nodes[1].node.get_our_node_id()));
 	check_added_monitors!(nodes[1], 1);
 
 	if restore_between_fails {
@@ -1595,23 +1595,22 @@ fn do_during_funding_monitor_fail(fail_on_generate: bool, restore_between_fails:
 		assert!(restore_between_fails || !fail_on_generate); // We can't switch to good now (there's no monitor update)
 		assert!(fail_on_generate); // Somebody has to fail
 	}
-	let funding_signed_res = nodes[0].node.handle_funding_signed(&nodes[1].node.get_our_node_id(), &get_event_msg!(nodes[1], MessageSendEvent::SendFundingSigned, nodes[0].node.get_our_node_id()));
+	nodes[0].node.handle_funding_signed(&nodes[1].node.get_our_node_id(), &get_event_msg!(nodes[1], MessageSendEvent::SendFundingSigned, nodes[0].node.get_our_node_id()));
 	if fail_on_signed || !restore_between_fails {
-		if let msgs::ErrorPacket { err, action: msgs::ErrorAction::IgnoreError } = funding_signed_res.unwrap_err() {
-			if fail_on_generate && !restore_between_fails {
-				assert_eq!(err, "Previous monitor update failure prevented funding_signed from allowing funding broadcast");
-				check_added_monitors!(nodes[0], 0);
-			} else {
-				assert_eq!(err, "Failed to update ChannelMonitor");
-				check_added_monitors!(nodes[0], 1);
-			}
-		} else { panic!(); }
-
-		assert!(nodes[0].node.get_and_clear_pending_events().is_empty());
-		*nodes[0].chan_monitor.update_ret.lock().unwrap() = Ok(());
-		nodes[0].node.test_restore_channel_monitor();
+		if let MessageSendEvent::HandleError { node_id, action } = nodes[0].node.get_and_clear_pending_events()[0] {
+			if let msgs::ErrorAction::IgnoreError = action {
+				if fail_on_generate && !restore_between_fails {
+					check_added_monitors!(nodes[0], 0);
+				} else {
+					check_added_monitors!(nodes[0], 1);
+				}
+			} else { panic!(); }
+			*nodes[0].chan_monitor.update_ret.lock().unwrap() = Ok(());
+			nodes[0].node.test_restore_channel_monitor();
+		}
 	} else {
-		funding_signed_res.unwrap();
+		if let MessageSendEvent::HandleError { .. } = nodes[0].node.get_and_clear_pending_events()[0] {
+		} else { panic!(); }
 	}
 
 	check_added_monitors!(nodes[0], 1);
@@ -1628,7 +1627,7 @@ fn do_during_funding_monitor_fail(fail_on_generate: bool, restore_between_fails:
 
 	if confirm_a_first {
 		confirm_transaction(&nodes[0].chain_monitor, &funding_tx, funding_tx.version);
-		nodes[1].node.handle_funding_locked(&nodes[0].node.get_our_node_id(), &get_event_msg!(nodes[0], MessageSendEvent::SendFundingLocked, nodes[1].node.get_our_node_id())).unwrap();
+		nodes[1].node.handle_funding_locked(&nodes[0].node.get_our_node_id(), &get_event_msg!(nodes[0], MessageSendEvent::SendFundingLocked, nodes[1].node.get_our_node_id()));
 	} else {
 		assert!(!restore_b_before_conf);
 		confirm_transaction(&nodes[1].chain_monitor, &funding_tx, funding_tx.version);
@@ -1653,7 +1652,7 @@ fn do_during_funding_monitor_fail(fail_on_generate: bool, restore_between_fails:
 	check_added_monitors!(nodes[1], 1);
 
 	let (channel_id, (announcement, as_update, bs_update)) = if !confirm_a_first {
-		nodes[0].node.handle_funding_locked(&nodes[1].node.get_our_node_id(), &get_event_msg!(nodes[1], MessageSendEvent::SendFundingLocked, nodes[0].node.get_our_node_id())).unwrap();
+		nodes[0].node.handle_funding_locked(&nodes[1].node.get_our_node_id(), &get_event_msg!(nodes[1], MessageSendEvent::SendFundingLocked, nodes[0].node.get_our_node_id()));
 
 		confirm_transaction(&nodes[0].chain_monitor, &funding_tx, funding_tx.version);
 		let (funding_locked, channel_id) = create_chan_between_nodes_with_value_confirm_second(&nodes[1], &nodes[0]);
