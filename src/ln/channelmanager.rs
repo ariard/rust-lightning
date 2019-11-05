@@ -33,7 +33,7 @@ use ln::router::Route;
 use ln::msgs;
 use ln::msgs::LocalFeatures;
 use ln::onion_utils;
-use ln::msgs::{ChannelMessageHandler, DecodeError, HandleError};
+use ln::msgs::{ChannelMessageHandler, DecodeError, ErrorPacket};
 use chain::keysinterface::KeysInterface;
 use util::config::UserConfig;
 use util::{byte_utils, events};
@@ -143,14 +143,14 @@ type ShutdownResult = (Vec<Transaction>, Vec<(HTLCSource, PaymentHash)>);
 /// this struct and call handle_error!() on it.
 
 struct MsgHandleErrInternal {
-	err: msgs::HandleError,
+	err: msgs::ErrorPacket,
 	shutdown_finish: Option<(ShutdownResult, Option<msgs::ChannelUpdate>)>,
 }
 impl MsgHandleErrInternal {
 	#[inline]
 	fn send_err_msg_no_close(err: &'static str, channel_id: [u8; 32]) -> Self {
 		Self {
-			err: HandleError {
+			err: ErrorPacket {
 				err,
 				action: Some(msgs::ErrorAction::SendErrorMessage {
 					msg: msgs::ErrorMessage {
@@ -165,7 +165,7 @@ impl MsgHandleErrInternal {
 	#[inline]
 	fn ignore_no_close(err: &'static str) -> Self {
 		Self {
-			err: HandleError {
+			err: ErrorPacket {
 				err,
 				action: Some(msgs::ErrorAction::IgnoreError),
 			},
@@ -173,13 +173,13 @@ impl MsgHandleErrInternal {
 		}
 	}
 	#[inline]
-	fn from_no_close(err: msgs::HandleError) -> Self {
+	fn from_no_close(err: msgs::ErrorPacket) -> Self {
 		Self { err, shutdown_finish: None }
 	}
 	#[inline]
 	fn from_finish_shutdown(err: &'static str, channel_id: [u8; 32], shutdown_res: ShutdownResult, channel_update: Option<msgs::ChannelUpdate>) -> Self {
 		Self {
-			err: HandleError {
+			err: ErrorPacket {
 				err,
 				action: Some(msgs::ErrorAction::SendErrorMessage {
 					msg: msgs::ErrorMessage {
@@ -195,11 +195,11 @@ impl MsgHandleErrInternal {
 	fn from_chan_no_close(err: ChannelError, channel_id: [u8; 32]) -> Self {
 		Self {
 			err: match err {
-				ChannelError::Ignore(msg) => HandleError {
+				ChannelError::Ignore(msg) => ErrorPacket {
 					err: msg,
 					action: Some(msgs::ErrorAction::IgnoreError),
 				},
-				ChannelError::Close(msg) => HandleError {
+				ChannelError::Close(msg) => ErrorPacket {
 					err: msg,
 					action: Some(msgs::ErrorAction::SendErrorMessage {
 						msg: msgs::ErrorMessage {
@@ -208,7 +208,7 @@ impl MsgHandleErrInternal {
 						},
 					}),
 				},
-				ChannelError::CloseDelayBroadcast { msg, .. } => HandleError {
+				ChannelError::CloseDelayBroadcast { msg, .. } => ErrorPacket {
 					err: msg,
 					action: Some(msgs::ErrorAction::SendErrorMessage {
 						msg: msgs::ErrorMessage {
@@ -1009,9 +1009,9 @@ impl ChannelManager {
 
 	/// only fails if the channel does not yet have an assigned short_id
 	/// May be called with channel_state already locked!
-	fn get_channel_update(&self, chan: &Channel) -> Result<msgs::ChannelUpdate, HandleError> {
+	fn get_channel_update(&self, chan: &Channel) -> Result<msgs::ChannelUpdate, ErrorPacket> {
 		let short_channel_id = match chan.get_short_channel_id() {
-			None => return Err(HandleError{err: "Channel not yet established", action: None}),
+			None => return Err(ErrorPacket{err: "Channel not yet established", action: None}),
 			Some(id) => id,
 		};
 
@@ -2292,7 +2292,7 @@ impl ChannelManager {
 					return Err(MsgHandleErrInternal::send_err_msg_no_close("Got a message for a channel from the wrong node!", msg.channel_id));
 				}
 				if !chan.get().is_usable() {
-					return Err(MsgHandleErrInternal::from_no_close(HandleError{err: "Got an announcement_signatures before we were ready for it", action: Some(msgs::ErrorAction::IgnoreError)}));
+					return Err(MsgHandleErrInternal::from_no_close(ErrorPacket{err: "Got an announcement_signatures before we were ready for it", action: Some(msgs::ErrorAction::IgnoreError)}));
 				}
 
 				let our_node_id = self.get_our_node_id();
@@ -2626,82 +2626,82 @@ impl ChainListener for ChannelManager {
 
 impl ChannelMessageHandler for ChannelManager {
 	//TODO: Handle errors and close channel (or so)
-	fn handle_open_channel(&self, their_node_id: &PublicKey, their_local_features: LocalFeatures, msg: &msgs::OpenChannel) -> Result<(), HandleError> {
+	fn handle_open_channel(&self, their_node_id: &PublicKey, their_local_features: LocalFeatures, msg: &msgs::OpenChannel) -> Result<(), ErrorPacket> {
 		let _ = self.total_consistency_lock.read().unwrap();
 		handle_error!(self, self.internal_open_channel(their_node_id, their_local_features, msg))
 	}
 
-	fn handle_accept_channel(&self, their_node_id: &PublicKey, their_local_features: LocalFeatures, msg: &msgs::AcceptChannel) -> Result<(), HandleError> {
+	fn handle_accept_channel(&self, their_node_id: &PublicKey, their_local_features: LocalFeatures, msg: &msgs::AcceptChannel) -> Result<(), ErrorPacket> {
 		let _ = self.total_consistency_lock.read().unwrap();
 		handle_error!(self, self.internal_accept_channel(their_node_id, their_local_features, msg))
 	}
 
-	fn handle_funding_created(&self, their_node_id: &PublicKey, msg: &msgs::FundingCreated) -> Result<(), HandleError> {
+	fn handle_funding_created(&self, their_node_id: &PublicKey, msg: &msgs::FundingCreated) -> Result<(), ErrorPacket> {
 		let _ = self.total_consistency_lock.read().unwrap();
 		handle_error!(self, self.internal_funding_created(their_node_id, msg))
 	}
 
-	fn handle_funding_signed(&self, their_node_id: &PublicKey, msg: &msgs::FundingSigned) -> Result<(), HandleError> {
+	fn handle_funding_signed(&self, their_node_id: &PublicKey, msg: &msgs::FundingSigned) -> Result<(), ErrorPacket> {
 		let _ = self.total_consistency_lock.read().unwrap();
 		handle_error!(self, self.internal_funding_signed(their_node_id, msg))
 	}
 
-	fn handle_funding_locked(&self, their_node_id: &PublicKey, msg: &msgs::FundingLocked) -> Result<(), HandleError> {
+	fn handle_funding_locked(&self, their_node_id: &PublicKey, msg: &msgs::FundingLocked) -> Result<(), ErrorPacket> {
 		let _ = self.total_consistency_lock.read().unwrap();
 		handle_error!(self, self.internal_funding_locked(their_node_id, msg))
 	}
 
-	fn handle_shutdown(&self, their_node_id: &PublicKey, msg: &msgs::Shutdown) -> Result<(), HandleError> {
+	fn handle_shutdown(&self, their_node_id: &PublicKey, msg: &msgs::Shutdown) -> Result<(), ErrorPacket> {
 		let _ = self.total_consistency_lock.read().unwrap();
 		handle_error!(self, self.internal_shutdown(their_node_id, msg))
 	}
 
-	fn handle_closing_signed(&self, their_node_id: &PublicKey, msg: &msgs::ClosingSigned) -> Result<(), HandleError> {
+	fn handle_closing_signed(&self, their_node_id: &PublicKey, msg: &msgs::ClosingSigned) -> Result<(), ErrorPacket> {
 		let _ = self.total_consistency_lock.read().unwrap();
 		handle_error!(self, self.internal_closing_signed(their_node_id, msg))
 	}
 
-	fn handle_update_add_htlc(&self, their_node_id: &PublicKey, msg: &msgs::UpdateAddHTLC) -> Result<(), msgs::HandleError> {
+	fn handle_update_add_htlc(&self, their_node_id: &PublicKey, msg: &msgs::UpdateAddHTLC) -> Result<(), ErrorPacket> {
 		let _ = self.total_consistency_lock.read().unwrap();
 		handle_error!(self, self.internal_update_add_htlc(their_node_id, msg))
 	}
 
-	fn handle_update_fulfill_htlc(&self, their_node_id: &PublicKey, msg: &msgs::UpdateFulfillHTLC) -> Result<(), HandleError> {
+	fn handle_update_fulfill_htlc(&self, their_node_id: &PublicKey, msg: &msgs::UpdateFulfillHTLC) -> Result<(), ErrorPacket> {
 		let _ = self.total_consistency_lock.read().unwrap();
 		handle_error!(self, self.internal_update_fulfill_htlc(their_node_id, msg))
 	}
 
-	fn handle_update_fail_htlc(&self, their_node_id: &PublicKey, msg: &msgs::UpdateFailHTLC) -> Result<(), HandleError> {
+	fn handle_update_fail_htlc(&self, their_node_id: &PublicKey, msg: &msgs::UpdateFailHTLC) -> Result<(), ErrorPacket> {
 		let _ = self.total_consistency_lock.read().unwrap();
 		handle_error!(self, self.internal_update_fail_htlc(their_node_id, msg))
 	}
 
-	fn handle_update_fail_malformed_htlc(&self, their_node_id: &PublicKey, msg: &msgs::UpdateFailMalformedHTLC) -> Result<(), HandleError> {
+	fn handle_update_fail_malformed_htlc(&self, their_node_id: &PublicKey, msg: &msgs::UpdateFailMalformedHTLC) -> Result<(), ErrorPacket> {
 		let _ = self.total_consistency_lock.read().unwrap();
 		handle_error!(self, self.internal_update_fail_malformed_htlc(their_node_id, msg))
 	}
 
-	fn handle_commitment_signed(&self, their_node_id: &PublicKey, msg: &msgs::CommitmentSigned) -> Result<(), HandleError> {
+	fn handle_commitment_signed(&self, their_node_id: &PublicKey, msg: &msgs::CommitmentSigned) -> Result<(), ErrorPacket> {
 		let _ = self.total_consistency_lock.read().unwrap();
 		handle_error!(self, self.internal_commitment_signed(their_node_id, msg))
 	}
 
-	fn handle_revoke_and_ack(&self, their_node_id: &PublicKey, msg: &msgs::RevokeAndACK) -> Result<(), HandleError> {
+	fn handle_revoke_and_ack(&self, their_node_id: &PublicKey, msg: &msgs::RevokeAndACK) -> Result<(), ErrorPacket> {
 		let _ = self.total_consistency_lock.read().unwrap();
 		handle_error!(self, self.internal_revoke_and_ack(their_node_id, msg))
 	}
 
-	fn handle_update_fee(&self, their_node_id: &PublicKey, msg: &msgs::UpdateFee) -> Result<(), HandleError> {
+	fn handle_update_fee(&self, their_node_id: &PublicKey, msg: &msgs::UpdateFee) -> Result<(), ErrorPacket> {
 		let _ = self.total_consistency_lock.read().unwrap();
 		handle_error!(self, self.internal_update_fee(their_node_id, msg))
 	}
 
-	fn handle_announcement_signatures(&self, their_node_id: &PublicKey, msg: &msgs::AnnouncementSignatures) -> Result<(), HandleError> {
+	fn handle_announcement_signatures(&self, their_node_id: &PublicKey, msg: &msgs::AnnouncementSignatures) -> Result<(), ErrorPacket> {
 		let _ = self.total_consistency_lock.read().unwrap();
 		handle_error!(self, self.internal_announcement_signatures(their_node_id, msg))
 	}
 
-	fn handle_channel_reestablish(&self, their_node_id: &PublicKey, msg: &msgs::ChannelReestablish) -> Result<(), HandleError> {
+	fn handle_channel_reestablish(&self, their_node_id: &PublicKey, msg: &msgs::ChannelReestablish) -> Result<(), ErrorPacket> {
 		let _ = self.total_consistency_lock.read().unwrap();
 		handle_error!(self, self.internal_channel_reestablish(their_node_id, msg))
 	}
