@@ -392,7 +392,7 @@ pub fn do_test(data: &[u8]) {
 		($res: expr) => {
 			match $res {
 				Ok(()) => {},
-				Err(ErrorPacket { action: Some(ErrorAction::IgnoreError), .. }) => { },
+				Err(ErrorPacket { action: ErrorAction::IgnoreError, .. }) => { },
 				_ => { $res.unwrap() },
 			}
 		}
