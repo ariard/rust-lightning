@@ -34,6 +34,7 @@ use lightning::ln::channelmanager::{ChannelManager, PaymentHash, PaymentPreimage
 use lightning::ln::peer_handler::{MessageHandler,PeerManager,SocketDescriptor};
 use lightning::ln::router::Router;
 use lightning::util::events::{EventsProvider,Event};
+use lightning::util::enforcing_trait_impls::EnforcingChannelKeys;
 use lightning::util::logger::Logger;
 use lightning::util::config::UserConfig;
 
@@ -145,7 +146,7 @@ impl<'a> Hash for Peer<'a> {
 }
 
 struct MoneyLossDetector<'a, 'b> {
-	manager: Arc<ChannelManager<'b, InMemoryChannelKeys>>,
+	manager: Arc<ChannelManager<'b, EnforcingChannelKeys>>,
 	monitor: Arc<channelmonitor::SimpleManyChannelMonitor<OutPoint>>,
 	handler: PeerManager<Peer<'a>>,
 
@@ -158,7 +159,7 @@ struct MoneyLossDetector<'a, 'b> {
 	blocks_connected: u32,
 }
 impl<'a, 'b> MoneyLossDetector<'a, 'b> {
-	pub fn new(peers: &'a RefCell<[bool; 256]>, manager: Arc<ChannelManager<'b, InMemoryChannelKeys>>, monitor: Arc<channelmonitor::SimpleManyChannelMonitor<OutPoint>>, handler: PeerManager<Peer<'a>>) -> Self {
+	pub fn new(peers: &'a RefCell<[bool; 256]>, manager: Arc<ChannelManager<'b, EnforcingChannelKeys>>, monitor: Arc<channelmonitor::SimpleManyChannelMonitor<OutPoint>>, handler: PeerManager<Peer<'a>>) -> Self {
 		MoneyLossDetector {
 			manager,
 			monitor,
@@ -238,7 +239,7 @@ struct KeyProvider {
 	counter: AtomicU64,
 }
 impl KeysInterface for KeyProvider {
-	type ChanKeySigner = InMemoryChannelKeys;
+	type ChanKeySigner = EnforcingChannelKeys;
 
 	fn get_node_secret(&self) -> SecretKey {
 		self.node_secret.clone()
@@ -256,9 +257,9 @@ impl KeysInterface for KeyProvider {
 		PublicKey::from_secret_key(&secp_ctx, &SecretKey::from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]).unwrap())
 	}
 
-	fn get_channel_keys(&self, inbound: bool) -> InMemoryChannelKeys {
+	fn get_channel_keys(&self, inbound: bool) -> EnforcingChannelKeys {
 		let ctr = self.counter.fetch_add(1, Ordering::Relaxed) as u8;
-		if inbound {
+		EnforcingChannelKeys::new(if inbound {
 			InMemoryChannelKeys {
 				funding_key:               SecretKey::from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, ctr]).unwrap(),
 				revocation_base_key:       SecretKey::from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, ctr]).unwrap(),
@@ -276,7 +277,7 @@ impl KeysInterface for KeyProvider {
 				htlc_base_key:             SecretKey::from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 11, ctr]).unwrap(),
 				commitment_seed: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 12, ctr],
 			}
-		}
+		})
 	}
 
 	fn get_onion_rand(&self) -> (SecretKey, [u8; 32]) {
