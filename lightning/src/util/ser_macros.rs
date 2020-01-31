@@ -4,12 +4,15 @@ macro_rules! encode_tlv {
 		use bitcoin::consensus::encode::{Error, VarInt};
 		use util::ser::{WriterWriteAdaptor, LengthCalculatingWriter};
 		$(
+			// Type
 			VarInt($type).consensus_encode(WriterWriteAdaptor($stream))
 				.map_err(|e| if let Error::Io(ioe) = e { ioe } else { unreachable!() })?;
 			let mut len_calc = LengthCalculatingWriter(0);
+			// Length
 			$field.write(&mut len_calc)?;
 			VarInt(len_calc.0 as u64).consensus_encode(WriterWriteAdaptor($stream))
 				.map_err(|e| if let Error::Io(ioe) = e { ioe } else { unreachable!() })?;
+			// Value
 			$field.write($stream)?;
 		)*
 	} }

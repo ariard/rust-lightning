@@ -28,4 +28,6 @@ Notes on coding style:
  * Use tabs. If you want to align lines, use spaces. Any desired alignment
    should display fine at any tab-length display setting.
 
+Contributors are warmly welcome, see [CONTRIBUTING.md](CONTRIBUTING.md)
+
 License is Apache-2.0.
