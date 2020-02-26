@@ -46,6 +46,6 @@ Contributors are warmly welcome, see [CONTRIBUTING.md](CONTRIBUTING.md).
 Project Architecture
 ---------------------
 
-COMING SOON.
+See further [ARCH.md](ARCH.md).
 
 License is Apache-2.0.
