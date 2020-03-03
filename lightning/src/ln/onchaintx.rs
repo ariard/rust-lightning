@@ -400,6 +400,7 @@ impl OnchainTxHandler {
 		let new_timer = Self::get_height_timer(height, cached_claim_datas.soonest_timelock);
 		let mut inputs_witnesses_weight = 0;
 		let mut amt = 0;
+		let mut dynamic_fee = true;
 		for per_outp_material in cached_claim_datas.per_input_material.values() {
 			match per_outp_material {
 				&InputMaterial::Revoked { ref witness_script, ref is_htlc, ref amount, .. } => {
@@ -411,71 +412,97 @@ impl OnchainTxHandler {
 					amt += *amount;
 				},
 				&InputMaterial::LocalHTLC { .. } => { return None; }
+				&InputMaterial::Funding { .. } => {
+					dynamic_fee = false;
+				}
 			}
 		}
 
-		let predicted_weight = bumped_tx.get_weight() + inputs_witnesses_weight;
-		let mut new_feerate;
-		// If old feerate is 0, first iteration of this claim, use normal fee calculation
-		if cached_claim_datas.feerate_previous != 0 {
-			if let Some((new_fee, feerate)) = RBF_bump!(amt, cached_claim_datas.feerate_previous, fee_estimator, predicted_weight as u64) {
-				// If new computed fee is superior at the whole claimable amount burn all in fees
-				if new_fee > amt {
-					bumped_tx.output[0].value = 0;
-				} else {
-					bumped_tx.output[0].value = amt - new_fee;
+		if dynamic_fee {
+			let predicted_weight = bumped_tx.get_weight() + inputs_witnesses_weight;
+			let mut new_feerate;
+			// If old feerate is 0, first iteration of this claim, use normal fee calculation
+			if cached_claim_datas.feerate_previous != 0 {
+				if let Some((new_fee, feerate)) = RBF_bump!(amt, cached_claim_datas.feerate_previous, fee_estimator, predicted_weight as u64) {
+					// If new computed fee is superior at the whole claimable amount burn all in fees
+					if new_fee > amt {
+						bumped_tx.output[0].value = 0;
+					} else {
+						bumped_tx.output[0].value = amt - new_fee;
+					}
+					new_feerate = feerate;
+				} else { return None; }
+			} else {
+				if subtract_high_prio_fee!(self, fee_estimator, amt, predicted_weight, new_feerate) {
+					bumped_tx.output[0].value = amt;
+				} else { return None; }
+			}
+			assert!(new_feerate != 0);
+
+			for (i, (outp, per_outp_material)) in cached_claim_datas.per_input_material.iter().enumerate() {
+				match per_outp_material {
+					&InputMaterial::Revoked { ref witness_script, ref pubkey, ref key, ref is_htlc, ref amount } => {
+						let sighash_parts = bip143::SighashComponents::new(&bumped_tx);
+						let sighash = hash_to_message!(&sighash_parts.sighash_all(&bumped_tx.input[i], &witness_script, *amount)[..]);
+						let sig = self.secp_ctx.sign(&sighash, &key);
+						bumped_tx.input[i].witness.push(sig.serialize_der().to_vec());
+						bumped_tx.input[i].witness[0].push(SigHashType::All as u8);
+						if *is_htlc {
+							bumped_tx.input[i].witness.push(pubkey.unwrap().clone().serialize().to_vec());
+						} else {
+							bumped_tx.input[i].witness.push(vec!(1));
+						}
+						bumped_tx.input[i].witness.push(witness_script.clone().into_bytes());
+						log_trace!(self, "Going to broadcast Penalty Transaction {} claiming revoked {} output {} from {} with new feerate {}...", bumped_tx.txid(), if !is_htlc { "to_local" } else if HTLCType::scriptlen_to_htlctype(witness_script.len()) == Some(HTLCType::OfferedHTLC) { "offered" } else if HTLCType::scriptlen_to_htlctype(witness_script.len()) == Some(HTLCType::AcceptedHTLC) { "received" } else { "" }, outp.vout, outp.txid, new_feerate);
+					},
+					&InputMaterial::RemoteHTLC { ref witness_script, ref key, ref preimage, ref amount, ref locktime } => {
+						if !preimage.is_some() { bumped_tx.lock_time = *locktime }; // Right now we don't aggregate time-locked transaction, if we do we should set lock_time before to avoid breaking hash computation
+						let sighash_parts = bip143::SighashComponents::new(&bumped_tx);
+						let sighash = hash_to_message!(&sighash_parts.sighash_all(&bumped_tx.input[i], &witness_script, *amount)[..]);
+						let sig = self.secp_ctx.sign(&sighash, &key);
+						bumped_tx.input[i].witness.push(sig.serialize_der().to_vec());
+						bumped_tx.input[i].witness[0].push(SigHashType::All as u8);
+						if let &Some(preimage) = preimage {
+							bumped_tx.input[i].witness.push(preimage.clone().0.to_vec());
+						} else {
+							bumped_tx.input[i].witness.push(vec![0]);
+						}
+						bumped_tx.input[i].witness.push(witness_script.clone().into_bytes());
+						log_trace!(self, "Going to broadcast Claim Transaction {} claiming remote {} htlc output {} from {} with new feerate {}...", bumped_tx.txid(), if preimage.is_some() { "offered" } else { "received" }, outp.vout, outp.txid, new_feerate);
+					},
+					_ => unreachable!()
 				}
-				new_feerate = feerate;
-			} else { return None; }
+			}
+			log_trace!(self, "...with timer {}", new_timer);
+			assert!(predicted_weight >= bumped_tx.get_weight());
+			return Some((new_timer, new_feerate, bumped_tx))
 		} else {
-			if subtract_high_prio_fee!(self, fee_estimator, amt, predicted_weight, new_feerate) {
-				bumped_tx.output[0].value = amt;
-			} else { return None; }
-		}
-		assert!(new_feerate != 0);
-
-		for (i, (outp, per_outp_material)) in cached_claim_datas.per_input_material.iter().enumerate() {
-			match per_outp_material {
-				&InputMaterial::Revoked { ref witness_script, ref pubkey, ref key, ref is_htlc, ref amount } => {
-					let sighash_parts = bip143::SighashComponents::new(&bumped_tx);
-					let sighash = hash_to_message!(&sighash_parts.sighash_all(&bumped_tx.input[i], &witness_script, *amount)[..]);
-					let sig = self.secp_ctx.sign(&sighash, &key);
-					bumped_tx.input[i].witness.push(sig.serialize_der().to_vec());
-					bumped_tx.input[i].witness[0].push(SigHashType::All as u8);
-					if *is_htlc {
-						bumped_tx.input[i].witness.push(pubkey.unwrap().clone().serialize().to_vec());
-					} else {
-						bumped_tx.input[i].witness.push(vec!(1));
+			for (_, (outp, per_outp_material)) in cached_claim_datas.per_input_material.iter().enumerate() {
+				match per_outp_material {
+					&InputMaterial::LocalHTLC { .. } => {
+						//TODO : Given that Local Commitment Transaction and HTLC-Timeout/HTLC-Success are counter-signed by peer, we can't
+						// RBF them. Need a Lightning specs change and package relay modification :
+						// https://lists.linuxfoundation.org/pipermail/bitcoin-dev/2018-November/016518.html
+						return None;
+					},
+					&InputMaterial::Funding { ref local_tx_remote_signed, ref funding_key, ref funding_redeemscript, ref channel_value } => {
+						let mut local_tx = local_tx_remote_signed.clone();
+						local_tx.add_local_sig(funding_key, funding_redeemscript, *channel_value, &self.secp_ctx);
+						let signed_tx = local_tx.with_valid_witness().clone();
+						let mut amt_outputs = 0;
+						for outp in signed_tx.output.iter() {
+							amt_outputs += outp.value;
+						}
+						let feerate = (channel_value - amt_outputs) * 1000 / signed_tx.get_weight() as u64;
+						// Timer set to $NEVER given we can't bump tx without anchor outputs
+						log_trace!(self, "Going to broadcast Local Transaction {} claiming funding output {} from {}...", signed_tx.txid(), outp.vout, outp.txid);
+						return Some((::std::u32::MAX, feerate, signed_tx));
 					}
-					bumped_tx.input[i].witness.push(witness_script.clone().into_bytes());
-					log_trace!(self, "Going to broadcast Penalty Transaction {} claiming revoked {} output {} from {} with new feerate {}...", bumped_tx.txid(), if !is_htlc { "to_local" } else if HTLCType::scriptlen_to_htlctype(witness_script.len()) == Some(HTLCType::OfferedHTLC) { "offered" } else if HTLCType::scriptlen_to_htlctype(witness_script.len()) == Some(HTLCType::AcceptedHTLC) { "received" } else { "" }, outp.vout, outp.txid, new_feerate);
-				},
-				&InputMaterial::RemoteHTLC { ref witness_script, ref key, ref preimage, ref amount, ref locktime } => {
-					if !preimage.is_some() { bumped_tx.lock_time = *locktime }; // Right now we don't aggregate time-locked transaction, if we do we should set lock_time before to avoid breaking hash computation
-					let sighash_parts = bip143::SighashComponents::new(&bumped_tx);
-					let sighash = hash_to_message!(&sighash_parts.sighash_all(&bumped_tx.input[i], &witness_script, *amount)[..]);
-					let sig = self.secp_ctx.sign(&sighash, &key);
-					bumped_tx.input[i].witness.push(sig.serialize_der().to_vec());
-					bumped_tx.input[i].witness[0].push(SigHashType::All as u8);
-					if let &Some(preimage) = preimage {
-						bumped_tx.input[i].witness.push(preimage.clone().0.to_vec());
-					} else {
-						bumped_tx.input[i].witness.push(vec![0]);
-					}
-					bumped_tx.input[i].witness.push(witness_script.clone().into_bytes());
-					log_trace!(self, "Going to broadcast Claim Transaction {} claiming remote {} htlc output {} from {} with new feerate {}...", bumped_tx.txid(), if preimage.is_some() { "offered" } else { "received" }, outp.vout, outp.txid, new_feerate);
-				},
-				&InputMaterial::LocalHTLC { .. } => {
-					//TODO : Given that Local Commitment Transaction and HTLC-Timeout/HTLC-Success are counter-signed by peer, we can't
-					// RBF them. Need a Lightning specs change and package relay modification :
-					// https://lists.linuxfoundation.org/pipermail/bitcoin-dev/2018-November/016518.html
-					return None;
+					_ => unreachable!()
 				}
 			}
 		}
-		log_trace!(self, "...with timer {}", new_timer);
-		assert!(predicted_weight >= bumped_tx.get_weight());
-		Some((new_timer, new_feerate, bumped_tx))
+		None
 	}
 
 	pub(super) fn block_connected<B: Deref, F: Deref>(&mut self, txn_matched: &[&Transaction], claimable_outpoints: Vec<ClaimRequest>, height: u32, broadcaster: B, fee_estimator: F) -> Vec<SpendableOutputDescriptor>
@@ -514,6 +541,12 @@ impl OnchainTxHandler {
 			if let Some((new_timer, new_feerate, tx)) = self.generate_claim_tx(height, &claim_material, &*fee_estimator) {
 				claim_material.height_timer = new_timer;
 				claim_material.feerate_previous = new_feerate;
+				if claim_material.height_timer != ::std::u32::MAX {
+					spendable_outputs.push(SpendableOutputDescriptor::StaticOutput {
+						outpoint: BitcoinOutPoint { txid: tx.txid(), vout: 0 },
+						output: tx.output[0].clone(),
+					});
+				}
 				let txid = tx.txid();
 				self.pending_claim_requests.insert(txid, claim_material);
 				for k in claim.1.keys() {
@@ -521,10 +554,6 @@ impl OnchainTxHandler {
 					self.claimable_outpoints.insert(k.clone(), (txid, height));
 				}
 				log_trace!(self, "Broadcast onchain {}", log_tx!(tx));
-				spendable_outputs.push(SpendableOutputDescriptor::StaticOutput {
-					outpoint: BitcoinOutPoint { txid: tx.txid(), vout: 0 },
-					output: tx.output[0].clone(),
-				});
 				broadcaster.broadcast_transaction(&tx);
 			}
 		}
