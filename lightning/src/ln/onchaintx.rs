@@ -45,6 +45,10 @@ enum OnchainEvent {
 	ContentiousOutpoint {
 		outpoint: BitcoinOutPoint,
 		input_material: InputMaterial,
+	},
+	/// Output spendable by user wallet, assuming its feeded by SpendableOutput
+	MaturingSpendableOutput {
+
 	}
 }
 
@@ -512,6 +516,14 @@ impl OnchainTxHandler {
 		None
 	}
 
+	fn generate_spendable_outputs(&self, height: u32, cached_claim_datas: &ClaimTxBumpMaterial, transaction: &Transaction) -> Vec<SpendableOutputDescriptor> {
+		// for i ...
+		// 	generate Static
+		// 	generate Dynamic
+		//
+		// //XXX: remove stuff from ChannelMonitor
+	}
+
 	pub(super) fn block_connected<B: Deref, F: Deref>(&mut self, txn_matched: &[&Transaction], claimable_outpoints: Vec<ClaimRequest>, height: u32, broadcaster: B, fee_estimator: F) -> Vec<SpendableOutputDescriptor>
 		where B::Target: BroadcasterInterface,
 		      F::Target: FeeEstimator
@@ -548,6 +560,7 @@ impl OnchainTxHandler {
 			if let Some((new_timer, new_feerate, tx)) = self.generate_claim_tx(height, &claim_material, &*fee_estimator) {
 				claim_material.height_timer = new_timer;
 				claim_material.feerate_previous = new_feerate;
+				let spendable_outputs = self.generate_spendable_outputs(height, &claim_material, &tx);
 				if claim_material.height_timer != ::std::u32::MAX {
 					spendable_outputs.push(SpendableOutputDescriptor::StaticOutput {
 						outpoint: BitcoinOutPoint { txid: tx.txid(), vout: 0 },
