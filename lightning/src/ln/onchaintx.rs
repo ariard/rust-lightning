@@ -485,7 +485,7 @@ impl OnchainTxHandler {
 		} else {
 			for (_, (outp, per_outp_material)) in cached_claim_datas.per_input_material.iter().enumerate() {
 				match per_outp_material {
-					&InputMaterial::LocalHTLC { ref their_sig, ref preimage, ref amount, ref feerate_per_kw, ref their_to_self_delay, ref htlc, ref delayed_payment_key, ref revocation_key, ref a_htlc_key, ref b_htlc_key, ref per_commitment_point, ref htlc_base_key } => {
+					&InputMaterial::LocalHTLC { ref their_sig, ref preimage, ref amount, ref feerate_per_kw, ref their_to_self_delay, ref htlc, ref delayed_payment_key, ref revocation_key, ref a_htlc_key, ref b_htlc_key, ref per_commitment_point, ref htlc_base_key, .. } => {
 						let mut htlc_tx = chan_utils::build_htlc_transaction(&outp.txid, *feerate_per_kw, *their_to_self_delay, htlc, delayed_payment_key, revocation_key);
 						match chan_utils::sign_htlc_transaction(&mut htlc_tx, their_sig, preimage, htlc, a_htlc_key, b_htlc_key, revocation_key, per_commitment_point, htlc_base_key, &self.secp_ctx) {
 							Ok(res) => res,
@@ -520,20 +520,26 @@ impl OnchainTxHandler {
 		let txid = tx.txid();
 		for (_, (_, per_outp_material)) in cached_claim_datas.per_input_material.iter().enumerate() {
 			match per_outp_material {
-				&InputMaterial::Revoked { .. } => {
+				&InputMaterial::LocalHTLC { ref per_commitment_point, ref delayed_payment_key, ref revocation_key, ref delayed_payment_base_key, ref their_to_self_delay, .. } => {
+					if let Ok(local_delayedkey) = chan_utils::derive_private_key(&self.secp_ctx, per_commitment_point, delayed_payment_base_key) {
+						return Some(SpendableOutputDescriptor::DynamicOutputP2WSH {
+							outpoint: BitcoinOutPoint { txid, vout: 0 },
+							key: local_delayedkey,
+							witness_script: chan_utils::get_revokeable_redeemscript(&revocation_key, *their_to_self_delay, &delayed_payment_key),
+							to_self_delay: *their_to_self_delay,
+							output: tx.output[0].clone(),
+						});
+					}
+				},
+				&InputMaterial::Funding { .. } => {
+				},
+				_ => {
 					log_trace!(self, "Marking revoked output {}:{} for spending", txid, 0);
 					return Some(SpendableOutputDescriptor::StaticOutput {
 						outpoint: BitcoinOutPoint { txid, vout: 0 },
 						output: tx.output[0].clone(),
 					});
-				},
-				&InputMaterial::RemoteHTLC { .. } => {
-					return Some(SpendableOutputDescriptor::StaticOutput {
-						outpoint: BitcoinOutPoint { txid, vout: 0 },
-						output: tx.output[0].clone(),
-					});
-				},
-				_ => {},
+				}
 			}
 		}
 		None

@@ -478,6 +478,7 @@ pub(crate) enum InputMaterial {
 		b_htlc_key: PublicKey,
 		per_commitment_point: PublicKey,
 		htlc_base_key: SecretKey,
+		delayed_payment_base_key: SecretKey, //tmp: key derivation scheme should be implemented by user wallet to avoid in-memory key transit via descriptor
 	},
 	Funding {
 		local_tx_remote_signed: LocalCommitmentTransaction,
@@ -506,7 +507,7 @@ impl Writeable for InputMaterial  {
 				writer.write_all(&byte_utils::be64_to_array(*amount))?;
 				writer.write_all(&byte_utils::be32_to_array(*locktime))?;
 			},
-			&InputMaterial::LocalHTLC { ref their_sig, ref preimage, ref amount, ref feerate_per_kw, ref their_to_self_delay, ref htlc, ref delayed_payment_key, ref revocation_key, ref a_htlc_key, ref b_htlc_key, ref per_commitment_point, ref htlc_base_key } => {
+			&InputMaterial::LocalHTLC { ref their_sig, ref preimage, ref amount, ref feerate_per_kw, ref their_to_self_delay, ref htlc, ref delayed_payment_key, ref revocation_key, ref a_htlc_key, ref b_htlc_key, ref per_commitment_point, ref htlc_base_key, ref delayed_payment_base_key } => {
 				writer.write_all(&[2; 1])?;
 				their_sig.write(writer)?;
 				preimage.write(writer)?;
@@ -520,6 +521,7 @@ impl Writeable for InputMaterial  {
 				b_htlc_key.write(writer)?;
 				per_commitment_point.write(writer)?;
 				htlc_base_key.write(writer)?;
+				delayed_payment_base_key.write(writer)?;
 			},
 			&InputMaterial::Funding { ref local_tx_remote_signed, ref funding_key, ref funding_redeemscript, ref channel_value } => {
 				writer.write_all(&[3; 1])?;
@@ -577,6 +579,7 @@ impl Readable for InputMaterial {
 				let b_htlc_key = Readable::read(reader)?;
 				let per_commitment_point = Readable::read(reader)?;
 				let htlc_base_key = Readable::read(reader)?;
+				let delayed_payment_base_key = Readable::read(reader)?;
 				InputMaterial::LocalHTLC {
 					their_sig,
 					preimage,
@@ -589,7 +592,8 @@ impl Readable for InputMaterial {
 					a_htlc_key,
 					b_htlc_key,
 					per_commitment_point,
-					htlc_base_key
+					htlc_base_key,
+					delayed_payment_base_key
 				}
 			},
 			3 => {
@@ -1802,8 +1806,7 @@ impl<ChanSigner: ChannelKeys> ChannelMonitor<ChanSigner> {
 								Err(_) => continue,
 							};
 
-							add_dynamic_output!(htlc_timeout_tx, 0);
-							claim_requests.push(ClaimRequest { absolute_timelock: ::std::u32::MAX, aggregable: false, outpoint: BitcoinOutPoint { txid: local_tx.txid, vout: transaction_output_index as u32 }, witness_data: InputMaterial::LocalHTLC { their_sig: *their_sig, preimage: None, amount: htlc.amount_msat / 1000, feerate_per_kw: local_tx.feerate_per_kw, their_to_self_delay: self.their_to_self_delay.unwrap(), delayed_payment_key: local_tx.delayed_payment_key, revocation_key: local_tx.revocation_key, htlc: htlc.clone(), a_htlc_key: local_tx.a_htlc_key, b_htlc_key: local_tx.b_htlc_key, per_commitment_point: local_tx.per_commitment_point, htlc_base_key: *htlc_base_key}});
+							claim_requests.push(ClaimRequest { absolute_timelock: ::std::u32::MAX, aggregable: false, outpoint: BitcoinOutPoint { txid: local_tx.txid, vout: transaction_output_index as u32 }, witness_data: InputMaterial::LocalHTLC { their_sig: *their_sig, preimage: None, amount: htlc.amount_msat / 1000, feerate_per_kw: local_tx.feerate_per_kw, their_to_self_delay: self.their_to_self_delay.unwrap(), delayed_payment_key: local_tx.delayed_payment_key, revocation_key: local_tx.revocation_key, htlc: htlc.clone(), a_htlc_key: local_tx.a_htlc_key, b_htlc_key: local_tx.b_htlc_key, per_commitment_point: local_tx.per_commitment_point, htlc_base_key: *htlc_base_key, delayed_payment_base_key: *delayed_payment_base_key}});
 							res.push(htlc_timeout_tx);
 						} else {
 							if let Some(payment_preimage) = self.payment_preimages.get(&htlc.payment_hash) {
@@ -1813,8 +1816,7 @@ impl<ChanSigner: ChannelKeys> ChannelMonitor<ChanSigner> {
 									Err(_) => continue,
 								};
 
-								add_dynamic_output!(htlc_success_tx, 0);
-								claim_requests.push(ClaimRequest { absolute_timelock: ::std::u32::MAX, aggregable: false, outpoint: BitcoinOutPoint { txid: local_tx.txid, vout: transaction_output_index as u32 }, witness_data: InputMaterial::LocalHTLC { their_sig: *their_sig, preimage: Some(*payment_preimage), amount: htlc.amount_msat / 1000, feerate_per_kw: local_tx.feerate_per_kw, their_to_self_delay: self.their_to_self_delay.unwrap(), delayed_payment_key: local_tx.delayed_payment_key, revocation_key: local_tx.revocation_key, htlc: htlc.clone(), a_htlc_key: local_tx.a_htlc_key, b_htlc_key: local_tx.b_htlc_key, per_commitment_point: local_tx.per_commitment_point, htlc_base_key: *htlc_base_key}});
+								claim_requests.push(ClaimRequest { absolute_timelock: ::std::u32::MAX, aggregable: false, outpoint: BitcoinOutPoint { txid: local_tx.txid, vout: transaction_output_index as u32 }, witness_data: InputMaterial::LocalHTLC { their_sig: *their_sig, preimage: Some(*payment_preimage), amount: htlc.amount_msat / 1000, feerate_per_kw: local_tx.feerate_per_kw, their_to_self_delay: self.their_to_self_delay.unwrap(), delayed_payment_key: local_tx.delayed_payment_key, revocation_key: local_tx.revocation_key, htlc: htlc.clone(), a_htlc_key: local_tx.a_htlc_key, b_htlc_key: local_tx.b_htlc_key, per_commitment_point: local_tx.per_commitment_point, htlc_base_key: *htlc_base_key, delayed_payment_base_key: *delayed_payment_base_key}});
 								res.push(htlc_success_tx);
 							}
 						}

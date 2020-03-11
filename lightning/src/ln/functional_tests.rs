@@ -4783,10 +4783,16 @@ fn test_dynamic_spendable_outputs_local_htlc_timeout_tx() {
 	nodes[0].block_notifier.block_connected(&Block { header, txdata: vec![local_txn[0].clone()] }, 200);
 	check_closed_broadcast!(nodes[0], false);
 
+	//XXX lock ?
 	let node_txn = nodes[0].tx_broadcaster.txn_broadcasted.lock().unwrap();
 	assert_eq!(node_txn[0].input.len(), 1);
 	assert_eq!(node_txn[0].input[0].witness.last().unwrap().len(), OFFERED_HTLC_SCRIPT_WEIGHT);
 	check_spends!(node_txn[0], local_txn[0]);
+
+	let header_201 = BlockHeader { version: 0x20000000, prev_blockhash: header.bitcoin_hash(), merkle_root: Default::default(), time: 42, bits: 42, nonce: 42 };
+	nodes[0].block_notifier.block_connected(&Block { header: header_201, txdata: vec![node_txn[0].clone()] }, 201);
+	let header_202 = BlockHeader { version: 0x20000000, prev_blockhash: header_201.bitcoin_hash(), merkle_root: Default::default(), time: 42, bits: 42, nonce: 42 };
+	connect_blocks(&nodes[0].block_notifier, ANTI_REORG_DELAY - 1, 201, true, header_202.bitcoin_hash());
 
 	// Verify that A is able to spend its own HTLC-Timeout tx thanks to spendable output event given back by its ChannelMonitor
 	let spend_txn = check_spendable_outputs!(nodes[0], 1);
