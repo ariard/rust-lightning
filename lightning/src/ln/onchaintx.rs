@@ -531,7 +531,22 @@ impl OnchainTxHandler {
 						});
 					}
 				},
-				&InputMaterial::Funding { .. } => {
+				&InputMaterial::Funding { ref per_commitment_point, ref delayed_payment_key, ref revocation_key, .. } => {
+					let witness_script = chan_utils::get_revokeable_redeemscript(&revocation_key, our_to_self_delay, &delayed_payment_key).to_v0_p2wsh();
+					let p2wsh = witness_script.to_v0_p2wsh();
+					for outp in tx.output.iter() {
+						if outp.script_pubkey == p2wsh {
+							if let Ok(local_delayedkey) = chan_utils::derive_private_key(&self.secp_ctx, per_commitment_point, delayed_payment_base_key) {
+								return Some(SpendableOutputDescriptor::DynamicOutputP2WSH {
+									outpoint: BitcoinOutPoint { txid, vout: 0 },
+									key: local_delayedkey,
+									witness_script,
+									to_self_delay: our_to_self_delay,
+									output: tx.output[0].clone(),
+								});
+							}
+						}
+					}
 				},
 				_ => {
 					log_trace!(self, "Marking revoked output {}:{} for spending", txid, 0);
