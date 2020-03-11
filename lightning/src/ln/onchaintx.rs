@@ -38,6 +38,7 @@ enum OnchainEvent {
 	/// bump-txn candidate buffer.
 	Claim {
 		claim_request: Sha256dHash,
+		onchain_claim: Option<Transaction>,
 	},
 	/// Claim tx aggregate multiple claimable outpoints. One of the outpoint may be claimed by a remote party tx.
 	/// In this case, we need to drop the outpoint and regenerate a new claim tx. By safety, we keep tracking
@@ -46,10 +47,6 @@ enum OnchainEvent {
 		outpoint: BitcoinOutPoint,
 		input_material: InputMaterial,
 	},
-	/// Output spendable by user wallet, assuming its feeded by SpendableOutput
-	MaturingSpendableOutput {
-
-	}
 }
 
 /// Higher-level cache structure needed to re-generate bumped claim txn if needed
@@ -204,9 +201,10 @@ impl Writeable for OnchainTxHandler {
 			writer.write_all(&byte_utils::be64_to_array(events.len() as u64))?;
 			for ev in events.iter() {
 				match *ev {
-					OnchainEvent::Claim { ref claim_request } => {
+					OnchainEvent::Claim { ref claim_request, ref onchain_claim } => {
 						writer.write_all(&[0; 1])?;
 						claim_request.write(writer)?;
+						onchain_claim.write(writer)?;
 					},
 					OnchainEvent::ContentiousOutpoint { ref outpoint, ref input_material } => {
 						writer.write_all(&[1; 1])?;
@@ -248,8 +246,10 @@ impl ReadableArgs<Arc<Logger>> for OnchainTxHandler {
 				let ev = match <u8 as Readable>::read(reader)? {
 					0 => {
 						let claim_request = Readable::read(reader)?;
+						let onchain_claim = Readable::read(reader)?;
 						OnchainEvent::Claim {
-							claim_request
+							claim_request,
+							onchain_claim
 						}
 					},
 					1 => {
@@ -516,12 +516,27 @@ impl OnchainTxHandler {
 		None
 	}
 
-	fn generate_spendable_outputs(&self, height: u32, cached_claim_datas: &ClaimTxBumpMaterial, transaction: &Transaction) -> Vec<SpendableOutputDescriptor> {
-		// for i ...
-		// 	generate Static
-		// 	generate Dynamic
-		//
-		// //XXX: remove stuff from ChannelMonitor
+	fn generate_spendable_output(&self, cached_claim_datas: &ClaimTxBumpMaterial, tx: &Transaction) -> Option<SpendableOutputDescriptor> {
+		let txid = tx.txid();
+		for (_, (_, per_outp_material)) in cached_claim_datas.per_input_material.iter().enumerate() {
+			match per_outp_material {
+				&InputMaterial::Revoked { .. } => {
+					log_trace!(self, "Marking revoked output {}:{} for spending", txid, 0);
+					return Some(SpendableOutputDescriptor::StaticOutput {
+						outpoint: BitcoinOutPoint { txid, vout: 0 },
+						output: tx.output[0].clone(),
+					});
+				},
+				&InputMaterial::RemoteHTLC { .. } => {
+					return Some(SpendableOutputDescriptor::StaticOutput {
+						outpoint: BitcoinOutPoint { txid, vout: 0 },
+						output: tx.output[0].clone(),
+					});
+				},
+				_ => {},
+			}
+		}
+		None
 	}
 
 	pub(super) fn block_connected<B: Deref, F: Deref>(&mut self, txn_matched: &[&Transaction], claimable_outpoints: Vec<ClaimRequest>, height: u32, broadcaster: B, fee_estimator: F) -> Vec<SpendableOutputDescriptor>
@@ -560,13 +575,6 @@ impl OnchainTxHandler {
 			if let Some((new_timer, new_feerate, tx)) = self.generate_claim_tx(height, &claim_material, &*fee_estimator) {
 				claim_material.height_timer = new_timer;
 				claim_material.feerate_previous = new_feerate;
-				let spendable_outputs = self.generate_spendable_outputs(height, &claim_material, &tx);
-				if claim_material.height_timer != ::std::u32::MAX {
-					spendable_outputs.push(SpendableOutputDescriptor::StaticOutput {
-						outpoint: BitcoinOutPoint { txid: tx.txid(), vout: 0 },
-						output: tx.output[0].clone(),
-					});
-				}
 				let txid = tx.txid();
 				self.pending_claim_requests.insert(txid, claim_material);
 				for k in claim.1.keys() {
@@ -601,8 +609,8 @@ impl OnchainTxHandler {
 						}
 
 						macro_rules! clean_claim_request_after_safety_delay {
-							() => {
-								let new_event = OnchainEvent::Claim { claim_request: first_claim_txid_height.0.clone() };
+							($tx: expr) => {
+								let new_event = OnchainEvent::Claim { claim_request: first_claim_txid_height.0.clone(), onchain_claim: $tx };
 								match self.onchain_events_waiting_threshold_conf.entry(height + ANTI_REORG_DELAY - 1) {
 									hash_map::Entry::Occupied(mut entry) => {
 										if !entry.get().contains(&new_event) {
@@ -620,7 +628,11 @@ impl OnchainTxHandler {
 						// before we could anyway with same inputs order than us), wait for
 						// ANTI_REORG_DELAY and clean the RBF tracking map.
 						if set_equality {
-							clean_claim_request_after_safety_delay!();
+							let onchain_claim = if tx.output[0].script_pubkey == self.destination_script || tx.output[0].script_pubkey == self.destination_script.to_p2sh() || tx.output[0].script_pubkey == self.destination_script.to_v0_p2wsh() {
+								log_trace!(self, "Onchain confirmation of claim tx {}, stagged until {}", tx.txid(), height + ANTI_REORG_DELAY - 1);
+								Some((*tx).clone())
+							} else { None };
+							clean_claim_request_after_safety_delay!(onchain_claim);
 						} else { // If false, generate new claim request with update outpoint set
 							for input in tx.input.iter() {
 								if let Some(input_material) = claim_material.per_input_material.remove(&input.previous_output) {
@@ -628,7 +640,7 @@ impl OnchainTxHandler {
 								}
 								// If there are no outpoints left to claim in this request, drop it entirely after ANTI_REORG_DELAY.
 								if claim_material.per_input_material.is_empty() {
-									clean_claim_request_after_safety_delay!();
+									clean_claim_request_after_safety_delay!(None);
 								}
 							}
 							//TODO: recompute soonest_timelock to avoid wasting a bit on fees
@@ -659,10 +671,15 @@ impl OnchainTxHandler {
 		if let Some(events) = self.onchain_events_waiting_threshold_conf.remove(&height) {
 			for ev in events {
 				match ev {
-					OnchainEvent::Claim { claim_request } => {
+					OnchainEvent::Claim { claim_request, onchain_claim } => {
 						// We may remove a whole set of claim outpoints here, as these one may have
 						// been aggregated in a single tx and claimed so atomically
 						if let Some(bump_material) = self.pending_claim_requests.remove(&claim_request) {
+							if let Some(our_tx) = onchain_claim {
+								if let Some(new_spendable_output) = self.generate_spendable_output(&bump_material, &our_tx) {
+									spendable_outputs.push(new_spendable_output);
+								}
+							}
 							for outpoint in bump_material.per_input_material.keys() {
 								self.claimable_outpoints.remove(&outpoint);
 							}
