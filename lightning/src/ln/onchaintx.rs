@@ -11,12 +11,15 @@ use bitcoin::util::bip143;
 use bitcoin_hashes::sha256d::Hash as Sha256dHash;
 
 use secp256k1::Secp256k1;
+use secp256k1::key::SecretKey;
 use secp256k1;
 
 use ln::msgs::DecodeError;
 use ln::channelmonitor::{ANTI_REORG_DELAY, CLTV_SHARED_CLAIM_BUFFER, InputMaterial, ClaimRequest};
 use ln::chan_utils::HTLCType;
 use chain::chaininterface::{FeeEstimator, BroadcasterInterface, ConfirmationTarget, MIN_RELAY_FEE_SAT_PER_1000_WEIGHT};
+use chain::transaction::OutPoint;
+use chain::keysinterface::ChannelKeys;
 use util::logger::Logger;
 use util::ser::{ReadableArgs, Readable, Writer, Writeable};
 use util::byte_utils;
@@ -44,6 +47,16 @@ enum OnchainEvent {
 		outpoint: BitcoinOutPoint,
 		input_material: InputMaterial,
 	}
+}
+
+struct Storage<ChanSigner: ChannelKeys> {
+	keys: ChanSigner,
+	funding_key: SecretKey,
+	revocation_base_key: SecretKey,
+	htlc_base_key: SecretKey,
+	delayed_payment_base_key: SecretKey,
+	payment_base_key: SecretKey,
+	funding_info: Option<(OutPoint, Script)>,
 }
 
 /// Higher-level cache structure needed to re-generate bumped claim txn if needed
@@ -138,9 +151,10 @@ macro_rules! subtract_high_prio_fee {
 
 /// OnchainTxHandler receives claiming requests, aggregates them if it's sound, broadcast and
 /// do RBF bumping if possible.
-#[derive(Clone)]
-pub struct OnchainTxHandler {
+pub struct OnchainTxHandler<ChanSigner: ChannelKeys> {
 	destination_script: Script,
+
+	key_storage: Storage<ChanSigner>,
 
 	// Used to track claiming requests. If claim tx doesn't confirm before height timer expiration we need to bump
 	// it (RBF or CPFP). If an input has been part of an aggregate tx at first claim try, we need to keep it within
@@ -175,9 +189,26 @@ pub struct OnchainTxHandler {
 	logger: Arc<Logger>
 }
 
-impl Writeable for OnchainTxHandler {
-	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), ::std::io::Error> {
+impl<ChanSigner: ChannelKeys + Writeable> OnchainTxHandler<ChanSigner> {
+	pub(crate) fn write<W: Writer>(&self, writer: &mut W) -> Result<(), ::std::io::Error> {
 		self.destination_script.write(writer)?;
+
+		self.key_storage.keys.write(writer)?;
+		writer.write_all(&self.key_storage.funding_key[..])?;
+		writer.write_all(&self.key_storage.revocation_base_key[..])?;
+		writer.write_all(&self.key_storage.htlc_base_key[..])?;
+		writer.write_all(&self.key_storage.delayed_payment_base_key[..])?;
+		writer.write_all(&self.key_storage.payment_base_key[..])?;
+		match self.key_storage.funding_info  {
+			Some((ref outpoint, ref script)) => {
+				writer.write_all(&outpoint.txid[..])?;
+				writer.write_all(&byte_utils::be16_to_array(outpoint.index))?;
+				script.write(writer)?;
+			},
+			None => {
+				debug_assert!(false, "Try to serialize a useless Local monitor !");
+			},
+		}
 
 		writer.write_all(&byte_utils::be64_to_array(self.pending_claim_requests.len() as u64))?;
 		for (ref ancestor_claim_txid, claim_tx_data) in self.pending_claim_requests.iter() {
@@ -214,9 +245,34 @@ impl Writeable for OnchainTxHandler {
 	}
 }
 
-impl ReadableArgs<Arc<Logger>> for OnchainTxHandler {
+impl<ChanSigner: ChannelKeys + Readable> ReadableArgs<Arc<Logger>> for OnchainTxHandler<ChanSigner> {
 	fn read<R: ::std::io::Read>(reader: &mut R, logger: Arc<Logger>) -> Result<Self, DecodeError> {
 		let destination_script = Readable::read(reader)?;
+
+		let key_storage = {
+			let keys = Readable::read(reader)?;
+			let funding_key = Readable::read(reader)?;
+			let revocation_base_key = Readable::read(reader)?;
+			let htlc_base_key = Readable::read(reader)?;
+			let delayed_payment_base_key = Readable::read(reader)?;
+			let payment_base_key = Readable::read(reader)?;
+			// Technically this can fail and serialize fail a round-trip, but only for serialization of
+			// barely-init'd ChannelMonitors that we can't do anything with.
+			let outpoint = OutPoint {
+				txid: Readable::read(reader)?,
+				index: Readable::read(reader)?,
+			};
+			let funding_info = Some((outpoint, Readable::read(reader)?));
+			Storage {
+				keys,
+				funding_key,
+				revocation_base_key,
+				htlc_base_key,
+				delayed_payment_base_key,
+				payment_base_key,
+				funding_info,
+			}
+		};
 
 		let pending_claim_requests_len: u64 = Readable::read(reader)?;
 		let mut pending_claim_requests = HashMap::with_capacity(cmp::min(pending_claim_requests_len as usize, MAX_ALLOC_SIZE / 128));
@@ -263,6 +319,7 @@ impl ReadableArgs<Arc<Logger>> for OnchainTxHandler {
 
 		Ok(OnchainTxHandler {
 			destination_script,
+			key_storage,
 			claimable_outpoints,
 			pending_claim_requests,
 			onchain_events_waiting_threshold_conf,
@@ -272,10 +329,27 @@ impl ReadableArgs<Arc<Logger>> for OnchainTxHandler {
 	}
 }
 
-impl OnchainTxHandler {
-	pub(super) fn new(destination_script: Script, logger: Arc<Logger>) -> Self {
+impl<ChanSigner: ChannelKeys> OnchainTxHandler<ChanSigner> {
+	pub(super) fn new(destination_script: Script, keys: ChanSigner, funding_info: (OutPoint, Script), logger: Arc<Logger>) -> Self {
+		let funding_key = keys.funding_key().clone();
+		let revocation_base_key = keys.revocation_base_key().clone();
+		let htlc_base_key = keys.htlc_base_key().clone();
+		let delayed_payment_base_key = keys.delayed_payment_base_key().clone();
+		let payment_base_key = keys.payment_base_key().clone();
+
+		let key_storage = Storage {
+			keys,
+			funding_key,
+			revocation_base_key,
+			htlc_base_key,
+			delayed_payment_base_key,
+			payment_base_key,
+			funding_info: Some(funding_info),
+		};
+
 		OnchainTxHandler {
 			destination_script,
+			key_storage,
 			pending_claim_requests: HashMap::new(),
 			claimable_outpoints: HashMap::new(),
 			onchain_events_waiting_threshold_conf: HashMap::new(),
