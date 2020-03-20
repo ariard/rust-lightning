@@ -553,6 +553,10 @@ impl LocalCommitmentTransaction {
 		self.tx.txid()
 	}
 
+	pub fn tx(&mut self) -> &mut Transaction {
+		&mut self.tx
+	}
+
 	pub fn has_local_sig(&self) -> bool {
 		if self.tx.input.len() != 1 { panic!("Commitment transactions must have input count == 1!"); }
 		if self.tx.input[0].witness.len() == 4 {
@@ -565,23 +569,6 @@ impl LocalCommitmentTransaction {
 			assert!(self.tx.input[0].witness[1].is_empty() || self.tx.input[0].witness[2].is_empty());
 			false
 		}
-	}
-
-	pub fn add_local_sig<T: secp256k1::Signing>(&mut self, funding_key: &SecretKey, funding_redeemscript: &Script, channel_value_satoshis: u64, secp_ctx: &Secp256k1<T>) {
-		if self.has_local_sig() { return; }
-		let sighash = hash_to_message!(&bip143::SighashComponents::new(&self.tx)
-			.sighash_all(&self.tx.input[0], funding_redeemscript, channel_value_satoshis)[..]);
-		let our_sig = secp_ctx.sign(&sighash, funding_key);
-
-		if self.tx.input[0].witness[1].is_empty() {
-			self.tx.input[0].witness[1] = our_sig.serialize_der().to_vec();
-			self.tx.input[0].witness[1].push(SigHashType::All as u8);
-		} else {
-			self.tx.input[0].witness[2] = our_sig.serialize_der().to_vec();
-			self.tx.input[0].witness[2].push(SigHashType::All as u8);
-		}
-
-		self.tx.input[0].witness.push(funding_redeemscript.as_bytes().to_vec());
 	}
 
 	pub fn without_valid_witness(&self) -> &Transaction { &self.tx }

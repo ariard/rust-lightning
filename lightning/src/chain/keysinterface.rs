@@ -2,7 +2,7 @@
 //! spendable on-chain outputs which the user owns and is responsible for using just as any other
 //! on-chain output which is theirs.
 
-use bitcoin::blockdata::transaction::{Transaction, OutPoint, TxOut};
+use bitcoin::blockdata::transaction::{Transaction, OutPoint, TxOut, SigHashType};
 use bitcoin::blockdata::script::{Script, Builder};
 use bitcoin::blockdata::opcodes;
 use bitcoin::network::constants::Network;
@@ -215,6 +215,13 @@ pub trait ChannelKeys : Send+Clone {
 	/// making the callee generate it via some util function we expose)!
 	fn sign_remote_commitment<T: secp256k1::Signing + secp256k1::Verification>(&self, feerate_per_kw: u64, commitment_tx: &Transaction, keys: &TxCreationKeys, htlcs: &[&HTLCOutputInCommitment], to_self_delay: u16, secp_ctx: &Secp256k1<T>) -> Result<(Signature, Vec<Signature>), ()>;
 
+	/// Create a signature for a local commitment transaction
+	///
+	/// TODO: Document the things someone using this interface should enforce before signing.
+	/// TODO: Add more input vars to enable better checking (preferably removing commitment_tx and
+	/// making the callee generate it via some util function we expose)!
+	fn sign_local_commitment<T: secp256k1::Signing + secp256k1::Verification>(&self, local_commitment_tx: &mut Transaction, funding_redeemscript: &Script, channel_value_satoshis: u64, secp_ctx: &Secp256k1<T>);
+
 	/// Create a signature for a (proposed) closing transaction.
 	///
 	/// Note that, due to rounding, there may be one "missing" satoshi, and either party may have
@@ -340,6 +347,35 @@ impl ChannelKeys for InMemoryChannelKeys {
 		}
 
 		Ok((commitment_sig, htlc_sigs))
+	}
+
+	fn sign_local_commitment<T: secp256k1::Signing + secp256k1::Verification>(&self, local_commitment_tx: &mut Transaction, funding_redeemscript: &Script, channel_value_satoshis: u64, secp_ctx: &Secp256k1<T>) {
+		if local_commitment_tx.input.len() != 1 { panic!("Commitment transactions must have input count == 1!"); }
+		let has_local_sig = if local_commitment_tx.input[0].witness.len() == 4 {
+			assert!(!local_commitment_tx.input[0].witness[1].is_empty());
+			assert!(!local_commitment_tx.input[0].witness[2].is_empty());
+			true
+		} else {
+			assert_eq!(local_commitment_tx.input[0].witness.len(), 3);
+			assert!(local_commitment_tx.input[0].witness[0].is_empty());
+			assert!(local_commitment_tx.input[0].witness[1].is_empty() || local_commitment_tx.input[0].witness[2].is_empty());
+			false
+		};
+		if has_local_sig { return; }
+
+		let sighash = hash_to_message!(&bip143::SighashComponents::new(&local_commitment_tx)
+			.sighash_all(&local_commitment_tx.input[0], funding_redeemscript, channel_value_satoshis)[..]);
+		let our_sig = secp_ctx.sign(&sighash, &self.funding_key);
+
+		if local_commitment_tx.input[0].witness[1].is_empty() {
+			local_commitment_tx.input[0].witness[1] = our_sig.serialize_der().to_vec();
+			local_commitment_tx.input[0].witness[1].push(SigHashType::All as u8);
+		} else {
+			local_commitment_tx.input[0].witness[2] = our_sig.serialize_der().to_vec();
+			local_commitment_tx.input[0].witness[2].push(SigHashType::All as u8);
+		}
+
+		local_commitment_tx.input[0].witness.push(funding_redeemscript.as_bytes().to_vec());
 	}
 
 	fn sign_closing_transaction<T: secp256k1::Signing>(&self, closing_tx: &Transaction, secp_ctx: &Secp256k1<T>) -> Result<Signature, ()> {
