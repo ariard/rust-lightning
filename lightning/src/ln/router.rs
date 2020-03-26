@@ -859,6 +859,16 @@ impl Router {
 		// uptime/success in using a node in the past.
 		let network = self.network_map.read().unwrap();
 
+		if let Some(first_hops) = first_hops {
+			for hop in first_hops {
+				if let Some(short_chanid) = hop.short_channel_id {
+					log_trace!(self, "First hop link {}", short_chanid);
+				}
+			}
+		}
+		for hop in last_hops {
+			log_trace!(self, "Last hop link {}", hop.short_channel_id);
+		}
 		if *target == network.our_node_id {
 			return Err(LightningError{err: "Cannot generate a route to ourselves", action: ErrorAction::IgnoreError});
 		}
@@ -888,6 +898,7 @@ impl Router {
 		if let Some(hops) = first_hops {
 			for chan in hops {
 				let short_channel_id = chan.short_channel_id.expect("first_hops should be filled in with usable channels, not pending ones");
+				log_trace!(self, "First hop link {} to {}", chan.short_channel_id.unwrap(), chan.remote_network_id);
 				if chan.remote_network_id == *target {
 					return Ok(Route {
 						paths: vec![vec![RouteHop {
@@ -975,8 +986,11 @@ impl Router {
 					}
 				}
 
+				log_trace!(self, "Node {} requires {}", $node_id, $node.features.requires_unknown_bits());
 				if !$node.features.requires_unknown_bits() {
+					log_trace!(self, "Node {} with {} links", $node_id, $node.channels.len());
 					for chan_id in $node.channels.iter() {
+						log_trace!(self, "Adding link {}", chan_id);
 						let chan = network.channels.get(chan_id).unwrap();
 						if !chan.features.requires_unknown_bits() {
 							if chan.one_to_two.src_node_id == *$node_id {
@@ -999,6 +1013,7 @@ impl Router {
 			};
 		}
 
+		log_trace!(self, "Tracing route to {}...", target);
 		match network.nodes.get(target) {
 			None => {},
 			Some(node) => {
@@ -1026,6 +1041,7 @@ impl Router {
 		}
 
 		while let Some(RouteGraphNode { pubkey, lowest_fee_to_node, .. }) = targets.pop() {
+			log_trace!(self, "Finding link for destination {}", pubkey);
 			if pubkey == network.our_node_id {
 				let mut res = vec!(dist.remove(&network.our_node_id).unwrap().3);
 				loop {
