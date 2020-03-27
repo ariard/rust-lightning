@@ -346,6 +346,58 @@ pub struct RouteHint {
 	pub htlc_minimum_msat: u64,
 }
 
+/// Details of a channel, as returned by Router::list_graph
+pub struct EdgeDetails {
+	/// The channel features
+	pub channel_features: ChannelFeatures,
+	/// The short_channel_id of this channel
+	pub short_channel_id: u64,
+	/// The alice node_id
+	pub a_node_id: PublicKey,
+	/// The alice last update sent
+	pub a_last_update: u32,
+	/// The alice channel liveliness
+	pub a_enabled: bool,
+	/// The alice CLTV expiry delta
+	pub a_cltv_expiry_delta: u16,
+	/// The alice HTLC minimum msat
+	pub a_htlc_minimum_msat: u64,
+	/// The alice static msat-denominated fee
+	pub a_fee_base_msat: u32,
+	/// The alice dynamic proportional fee
+	pub a_fee_proportional_millionths: u32,
+	/// The bob node_id
+	pub b_node_id: PublicKey,
+	/// The bob last update sent
+	pub b_last_update: u32,
+	/// The bob channel liveliness
+	pub b_enabled: bool,
+	/// The bob CLTV expiry delta
+	pub b_cltv_expiry_delta: u16,
+	/// The bob HTLC minimum msat
+	pub b_htlc_minimum_msat: u64,
+	/// The bob static msat-denominated fee
+	pub b_fee_base_msat: u32,
+	/// The bob dynamic proportinal fee
+	pub b_fee_proportional_millionths: u32,
+}
+
+/// Details of a node, as returned by Router::list_graph
+pub struct VerticeDetails {
+	/// The node features
+	pub node_features: NodeFeatures,
+	/// The node id
+	pub node_id: PublicKey,
+	/// Th last time node announcement has been received
+	pub last_update: u32,
+	/// The custom node color
+	pub rgb: [u8; 3],
+	/// The custom node alias
+	pub alias: [u8; 32],
+	/// The network addresses
+	pub addresses: Vec<NetAddress>,
+}
+
 /// Tracks a view of the network, receiving updates from peers and generating Routes to
 /// payment destinations.
 pub struct Router {
@@ -1056,6 +1108,48 @@ impl Router {
 		}
 
 		Err(LightningError{err: "Failed to find a path to the given destination", action: ErrorAction::IgnoreError})
+	}
+
+	/// Gets the list of announced channels/nodes, in random order. See EdgeDetails and VerticeDetails field documentation for
+	/// more information.
+	pub fn list_graph(&self) -> (Vec<EdgeDetails>, Vec<VerticeDetails>) {
+		let mut edges = Vec::new();
+		let mut vertices = Vec::new();
+
+		let network = self.network_map.read().unwrap();
+		edges.reserve(network.channels.len());
+		for (short_channel_id, chan) in network.channels.iter() {
+			edges.push(EdgeDetails {
+				channel_features: chan.features.clone(),
+				short_channel_id: *short_channel_id,
+				a_node_id: chan.one_to_two.src_node_id,
+				a_last_update: chan.one_to_two.last_update,
+				a_enabled: chan.one_to_two.enabled,
+				a_cltv_expiry_delta: chan.one_to_two.cltv_expiry_delta,
+				a_htlc_minimum_msat: chan.one_to_two.htlc_minimum_msat,
+				a_fee_base_msat: chan.one_to_two.fee_base_msat,
+				a_fee_proportional_millionths: chan.one_to_two.fee_proportional_millionths,
+				b_node_id: chan.two_to_one.src_node_id,
+				b_last_update: chan.two_to_one.last_update,
+				b_enabled: chan.two_to_one.enabled,
+				b_cltv_expiry_delta: chan.two_to_one.cltv_expiry_delta,
+				b_htlc_minimum_msat: chan.two_to_one.htlc_minimum_msat,
+				b_fee_base_msat: chan.two_to_one.fee_base_msat,
+				b_fee_proportional_millionths: chan.two_to_one.fee_proportional_millionths,
+			});
+		}
+		vertices.reserve(network.nodes.len());
+		for (node_id, node) in network.nodes.iter() {
+			vertices.push(VerticeDetails {
+				node_features: node.features.clone(),
+				node_id: *node_id,
+				last_update: if node.last_update.is_some() { node.last_update.unwrap() } else { 0 },
+				rgb: node.rgb,
+				alias: node.alias,
+				addresses: node.addresses.clone(),
+			});
+		}
+		(edges, vertices)
 	}
 }
 
