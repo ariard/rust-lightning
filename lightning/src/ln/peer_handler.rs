@@ -557,6 +557,7 @@ impl<Descriptor: SocketDescriptor, CM: Deref> PeerManager<Descriptor, CM> where 
 									peer.their_node_id = Some(their_node_id);
 									insert_node_id!();
 									let mut features = InitFeatures::supported();
+									log_trace!(self, "Testing peer {} for initial_routing_sync... {} !", log_pubkey!(peer.their_node_id.unwrap()), self.message_handler.route_handler.should_request_full_sync(&peer.their_node_id.unwrap()));
 									if self.message_handler.route_handler.should_request_full_sync(&peer.their_node_id.unwrap()) {
 										features.set_initial_routing_sync();
 									}
