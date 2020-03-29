@@ -141,7 +141,7 @@ pub(super) fn build_onion_payloads(path: &Vec<RouteHop>, total_msat: u64, paymen
 					short_channel_id: last_short_channel_id,
 				}
 			},
-			amt_to_forward: value_msat,
+			amt_to_forward: 0,
 			outgoing_cltv_value: cltv,
 		});
 		cur_value_msat += hop.fee_msat;
