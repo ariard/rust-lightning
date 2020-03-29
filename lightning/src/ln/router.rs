@@ -968,6 +968,7 @@ impl Router {
 			// $directional_info.
 			( $chan_id: expr, $dest_node_id: expr, $directional_info: expr, $chan_features: expr, $starting_fee_msat: expr ) => {
 				//TODO: Explore simply adding fee to hit htlc_minimum_msat
+				log_trace!(self, "Is value {} >= to htlc minimum msat {}", $starting_fee_msat as u64 + final_value_msat, $directional_info.htlc_minimum_msat);
 				if $starting_fee_msat as u64 + final_value_msat >= $directional_info.htlc_minimum_msat {
 					let proportional_fee_millions = ($starting_fee_msat + final_value_msat).checked_mul($directional_info.fee_proportional_millionths as u64);
 					if let Some(new_fee) = proportional_fee_millions.and_then(|part| {
@@ -1005,6 +1006,7 @@ impl Router {
 							lowest_fee_to_peer_through_node: total_fee,
 							lowest_fee_to_node: $starting_fee_msat as u64 + new_fee,
 						};
+						log_trace!(self, "Old entry {} vs new total fee {}", old_entry.0, total_fee);
 						if old_entry.0 > total_fee {
 							targets.push(new_graph_node);
 							old_entry.0 = total_fee;
@@ -1030,22 +1032,24 @@ impl Router {
 					}
 				}
 
-				log_trace!(self, "Node {} requires {}", $node_id, $node.features.requires_unknown_bits());
+				log_trace!(self, "Node {} requires unknown {}", $node_id, $node.features.requires_unknown_bits());
 				if !$node.features.requires_unknown_bits() {
 					log_trace!(self, "Node {} with {} links", $node_id, $node.channels.len());
 					for chan_id in $node.channels.iter() {
-						log_trace!(self, "Adding link {}", chan_id);
 						let chan = network.channels.get(chan_id).unwrap();
+						log_trace!(self, "Adding link {} requires unknown {}", chan_id, chan.features.requires_unknown_bits());
 						if !chan.features.requires_unknown_bits() {
 							if chan.one_to_two.src_node_id == *$node_id {
 								// ie $node is one, ie next hop in A* is two, via the two_to_one channel
 								if first_hops.is_none() || chan.two_to_one.src_node_id != network.our_node_id {
+									log_trace!(self, "As two to one link is enabled {}", chan.two_to_one.enabled);
 									if chan.two_to_one.enabled {
 										add_entry!(chan_id, chan.one_to_two.src_node_id, chan.two_to_one, chan.features, $fee_to_target_msat);
 									}
 								}
 							} else {
 								if first_hops.is_none() || chan.one_to_two.src_node_id != network.our_node_id {
+									log_trace!(self, "As one to two link is enabled {}", chan.one_to_two.enabled);
 									if chan.one_to_two.enabled {
 										add_entry!(chan_id, chan.two_to_one.src_node_id, chan.one_to_two, chan.features, $fee_to_target_msat);
 									}
@@ -1057,7 +1061,7 @@ impl Router {
 			};
 		}
 
-		log_trace!(self, "Tracing route to {}...", target);
+		log_trace!(self, "Adding link near to final {}...", target);
 		match network.nodes.get(target) {
 			None => {},
 			Some(node) => {
@@ -1084,6 +1088,7 @@ impl Router {
 			}
 		}
 
+		log_trace!(self, "Starting research to draw payment path");
 		while let Some(RouteGraphNode { pubkey, lowest_fee_to_node, .. }) = targets.pop() {
 			log_trace!(self, "Finding link for destination {}", pubkey);
 			if pubkey == network.our_node_id {
