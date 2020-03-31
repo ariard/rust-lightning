@@ -464,6 +464,8 @@ pub struct ChannelDetails {
 	/// True if the channel is (a) confirmed and funding_locked messages have been exchanged, (b)
 	/// the peer is connected, and (c) no monitor update failure is pending resolution.
 	pub is_live: bool,
+	/// Funding outpoint for this channel
+	pub funding_outpoint: OutPoint,
 }
 
 macro_rules! handle_error {
@@ -736,6 +738,7 @@ impl<ChanSigner: ChannelKeys, M: Deref, T: Deref, K: Deref, F: Deref> ChannelMan
 					outbound_capacity_msat,
 					user_id: channel.get_user_id(),
 					is_live: channel.is_live(),
+					funding_outpoint: channel.get_funding_txo().unwrap(),
 				});
 			}
 		}
