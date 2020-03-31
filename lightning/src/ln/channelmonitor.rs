@@ -237,10 +237,8 @@ pub struct SimpleManyChannelMonitor<Key, ChanSigner: ChannelKeys, T: Deref, F: D
 	where T::Target: BroadcasterInterface,
         F::Target: FeeEstimator
 {
-	#[cfg(test)] // Used in ChannelManager tests to manipulate channels directly
+	/// Raw monitors access for getting latest commitment transaction
 	pub monitors: Mutex<HashMap<Key, ChannelMonitor<ChanSigner>>>,
-	#[cfg(not(test))]
-	monitors: Mutex<HashMap<Key, ChannelMonitor<ChanSigner>>>,
 	chain_monitor: Arc<ChainWatchInterface>,
 	broadcaster: T,
 	logger: Arc<Logger>,
