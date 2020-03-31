@@ -413,7 +413,7 @@ pub struct ChannelManager<ChanSigner: ChannelKeys, M: Deref, T: Deref, K: Deref,
 
 /// The amount of time we require our counterparty wait to claim their money (ie time between when
 /// we, or our watchtower, must check for them having broadcast a theft transaction).
-pub(crate) const BREAKDOWN_TIMEOUT: u16 = 6 * 24;
+pub(crate) const BREAKDOWN_TIMEOUT: u16 = 6;
 /// The amount of time we're willing to wait to claim money back to us
 pub(crate) const MAX_LOCAL_BREAKDOWN_TIMEOUT: u16 = 6 * 24 * 7;
 
