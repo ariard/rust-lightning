@@ -2574,7 +2574,7 @@ impl<ChanSigner: ChannelKeys> ChannelMonitor<ChanSigner> {
 								};
 								let outp = TxOut {
 									script_pubkey: self.destination_script.clone(),
-									value: output.value,
+									value: output.value - 10000,
 								};
 								let mut spend_tx = Transaction {
 									version: 2,
