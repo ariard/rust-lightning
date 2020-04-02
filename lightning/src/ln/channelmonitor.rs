@@ -2587,7 +2587,7 @@ impl<ChanSigner: ChannelKeys> ChannelMonitor<ChanSigner> {
 								let local_delaysig = secp_ctx.sign(&sighash, &local_delayedkey);
 								spend_tx.input[0].witness.push(local_delaysig.serialize_der().to_vec());
 								spend_tx.input[0].witness[0].push(SigHashType::All as u8);
-								spend_tx.input[0].witness.push(vec!(0));
+								spend_tx.input[0].witness.push(vec!());
 								spend_tx.input[0].witness.push(witness_script.clone().into_bytes());
 								res.push(spend_tx);
 							}
