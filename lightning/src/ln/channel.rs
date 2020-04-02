@@ -524,7 +524,7 @@ impl<ChanSigner: ChannelKeys> Channel<ChanSigner> {
 			their_htlc_minimum_msat: 0,
 			our_htlc_minimum_msat: Channel::<ChanSigner>::derive_our_htlc_minimum_msat(feerate),
 			their_to_self_delay: 0,
-			our_to_self_delay: config.own_channel_config.our_to_self_delay,
+			our_to_self_delay: 6,
 			their_max_accepted_htlcs: 0,
 			minimum_depth: 0, // Filled in in accept_channel
 
