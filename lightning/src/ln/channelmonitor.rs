@@ -25,7 +25,7 @@ use bitcoin_hashes::sha256::Hash as Sha256;
 use bitcoin_hashes::hash160::Hash as Hash160;
 use bitcoin_hashes::sha256d::Hash as Sha256dHash;
 
-use secp256k1::{Secp256k1,Signature};
+use secp256k1::{Secp256k1,Signature, Message};
 use secp256k1::key::{SecretKey,PublicKey};
 use secp256k1;
 
@@ -2560,6 +2560,39 @@ impl<ChanSigner: ChannelKeys> ChannelMonitor<ChanSigner> {
 					res.append(&mut self.broadcast_by_local_state(local_tx, delayed_payment_base_key, 0).0);
 					// We throw away the generated waiting_first_conf data as we aren't (yet) confirmed and we don't actually know what the caller wants to do.
 					// The data will be re-generated and tracked in check_spend_local_transaction if we get a confirmation.
+
+					if let Ok(local_delayedkey) = chan_utils::derive_private_key(&self.secp_ctx, &local_tx.per_commitment_point, delayed_payment_base_key) {
+						let witness_script =  chan_utils::get_revokeable_redeemscript(&local_tx.revocation_key, self.our_to_self_delay, &local_tx.delayed_payment_key);
+						let revokeable_p2wsh = witness_script.to_v0_p2wsh();
+						for (idx, output) in local_tx.tx.without_valid_witness().output.iter().enumerate() {
+							if output.script_pubkey == revokeable_p2wsh {
+								let input = TxIn {
+									previous_output: BitcoinOutPoint { txid: local_tx.txid, vout: idx as u32 },
+									script_sig: Script::new(),
+									sequence: self.our_to_self_delay as u32,
+									witness: Vec::new(),
+								};
+								let outp = TxOut {
+									script_pubkey: self.destination_script.clone(),
+									value: output.value,
+								};
+								let mut spend_tx = Transaction {
+									version: 2,
+									lock_time: 0,
+									input: vec![input],
+									output: vec![outp],
+								};
+								let secp_ctx = Secp256k1::new();
+								let sighash = Message::from_slice(&bip143::SighashComponents::new(&spend_tx).sighash_all(&spend_tx.input[0], &witness_script, output.value)[..]).unwrap();
+								let local_delaysig = secp_ctx.sign(&sighash, &local_delayedkey);
+								spend_tx.input[0].witness.push(local_delaysig.serialize_der().to_vec());
+								spend_tx.input[0].witness[0].push(SigHashType::All as u8);
+								spend_tx.input[0].witness.push(vec!(0));
+								spend_tx.input[0].witness.push(witness_script.clone().into_bytes());
+								res.push(spend_tx);
+							}
+						}
+					}
 				},
 				_ => panic!("Can only broadcast by local channelmonitor"),
 			};
