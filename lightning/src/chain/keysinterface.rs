@@ -320,7 +320,8 @@ impl ChannelKeys for InMemoryChannelKeys {
 		let channel_funding_redeemscript = make_funding_redeemscript(&funding_pubkey, &remote_channel_pubkeys.funding_pubkey);
 
 		let commitment_sighash = hash_to_message!(&bip143::SighashComponents::new(&commitment_tx).sighash_all(&commitment_tx.input[0], &channel_funding_redeemscript, self.channel_value_satoshis)[..]);
-		let commitment_sig = secp_ctx.sign(&commitment_sighash, &self.funding_key);
+		let mut commitment_sig = secp_ctx.sign(&commitment_sighash, &self.funding_key);
+		commitment_sig.normalize_s();
 
 		let commitment_txid = commitment_tx.txid();
 

@@ -10,10 +10,10 @@ For Rust-Lightning clients which wish to make direct connections to Lightning P2
 """
 
 [dependencies]
-bitcoin = "0.21"
+bitcoin = { path = "../../dumb/rust-bitcoin" }
 bitcoin_hashes = "0.7"
 lightning = { version = "0.0.10", path = "../lightning" }
-secp256k1 = "0.15"
+secp256k1 = { path = "../../rust-secp256k1" }
 tokio = { version = ">=0.2.12", features = [ "io-util", "macros", "rt-core", "sync", "tcp", "time" ] }
 
 [dev-dependencies]
