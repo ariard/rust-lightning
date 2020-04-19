@@ -549,10 +549,10 @@ impl<ChanSigner: ChannelKeys> Channel<ChanSigner> {
 		where F::Target: FeeEstimator
 	{
 		if (feerate_per_kw as u64) < fee_estimator.get_est_sat_per_1000_weight(ConfirmationTarget::Background) {
-			return Err(ChannelError::Close("Peer's feerate much too low"));
+			//return Err(ChannelError::Close("Peer's feerate much too low"));
 		}
 		if (feerate_per_kw as u64) > fee_estimator.get_est_sat_per_1000_weight(ConfirmationTarget::HighPriority) * 2 {
-			return Err(ChannelError::Close("Peer's feerate much too high"));
+			//return Err(ChannelError::Close("Peer's feerate much too high"));
 		}
 		Ok(())
 	}
