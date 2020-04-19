@@ -1370,6 +1370,7 @@ impl<ChanSigner: ChannelKeys, M: Deref, T: Deref, K: Deref, F: Deref> ChannelMan
 		} else {
 			Ok(())
 		}
+
 	}
 
 	/// Call this upon creation of a funding transaction for the given channel.

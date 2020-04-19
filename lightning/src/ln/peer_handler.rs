@@ -739,6 +739,7 @@ impl<Descriptor: SocketDescriptor, CM: Deref> PeerManager<Descriptor, CM> where 
 												self.message_handler.chan_handler.handle_commitment_signed(&peer.their_node_id.unwrap(), &msg);
 											},
 											wire::Message::RevokeAndACK(msg) => {
+												panic!("Receive their RAA, simulate irresponsiveness");
 												self.message_handler.chan_handler.handle_revoke_and_ack(&peer.their_node_id.unwrap(), &msg);
 											},
 											wire::Message::UpdateFee(msg) => {
