@@ -198,7 +198,7 @@ impl Default for ChannelConfig {
 	fn default() -> Self {
 		ChannelConfig {
 			fee_proportional_millionths: 0,
-			announced_channel: false,
+			announced_channel: true,
 			commit_upfront_shutdown_pubkey: true,
 		}
 	}

@@ -635,11 +635,6 @@ impl<ChanSigner: ChannelKeys> Channel<ChanSigner> {
 		// Convert things into internal flags and prep our state:
 
 		let their_announce = if (msg.channel_flags & 1) == 1 { true } else { false };
-		if config.peer_channel_config_limits.force_announced_channel_preference {
-			if local_config.announced_channel != their_announce {
-				return Err(ChannelError::Close("Peer tried to open channel but their announcement preference is different from ours"));
-			}
-		}
 		// we either accept their preference or the preferences match
 		local_config.announced_channel = their_announce;
 
