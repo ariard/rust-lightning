@@ -494,6 +494,21 @@ pub fn build_htlc_transaction(prev_hash: &Txid, feerate_per_kw: u64, to_self_del
 	}
 }
 
+/// Gets the redeemscript for an anchor output from the funding public key.
+/// The witness in the spending input must be:
+/// <BIP 143 funding_signature>
+#[inline]
+pub(crate) fn get_anchor_redeemscript(funding_pubkey: &PublicKey) -> Script {
+	Builder::new().push_slice(&funding_pubkey.serialize()[..])
+	              .push_opcode(opcodes::all::OP_CHECKSIG)
+		      .push_opcode(opcodes::all::OP_IFDUP)
+		      .push_opcode(opcodes::all::OP_NOTIF)
+		      .push_int(16)
+		      .push_opcode(opcodes::all::OP_CSV)
+		      .push_opcode(opcodes::all::OP_ENDIF)
+		      .into_script()
+}
+
 #[derive(Clone)]
 /// We use this to track local commitment transactions and put off signing them until we are ready
 /// to broadcast. Eventually this will require a signer which is possibly external, but for now we
