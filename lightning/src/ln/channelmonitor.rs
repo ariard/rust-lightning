@@ -1131,9 +1131,9 @@ impl<ChanSigner: ChannelKeys> ChannelMonitor<ChanSigner> {
 		let local_commitment_tx = LocalSignedTx {
 			txid: initial_local_commitment_tx.txid(),
 			revocation_key: initial_local_commitment_tx.local_keys.revocation_key,
-			a_htlc_key: initial_local_commitment_tx.local_keys.a_htlc_key,
-			b_htlc_key: initial_local_commitment_tx.local_keys.b_htlc_key,
-			delayed_payment_key: initial_local_commitment_tx.local_keys.a_delayed_payment_key,
+			a_htlc_key: initial_local_commitment_tx.local_keys.local_htlc_key,
+			b_htlc_key: initial_local_commitment_tx.local_keys.remote_htlc_key,
+			delayed_payment_key: initial_local_commitment_tx.local_keys.local_delayed_payment_key,
 			per_commitment_point: initial_local_commitment_tx.local_keys.per_commitment_point,
 			feerate_per_kw: initial_local_commitment_tx.feerate_per_kw,
 			htlc_outputs: Vec::new(), // There are never any HTLCs in the initial commitment transactions
@@ -1307,9 +1307,9 @@ impl<ChanSigner: ChannelKeys> ChannelMonitor<ChanSigner> {
 		let mut new_local_commitment_tx = LocalSignedTx {
 			txid,
 			revocation_key: commitment_tx.local_keys.revocation_key,
-			a_htlc_key: commitment_tx.local_keys.a_htlc_key,
-			b_htlc_key: commitment_tx.local_keys.b_htlc_key,
-			delayed_payment_key: commitment_tx.local_keys.a_delayed_payment_key,
+			a_htlc_key: commitment_tx.local_keys.local_htlc_key,
+			b_htlc_key: commitment_tx.local_keys.remote_htlc_key,
+			delayed_payment_key: commitment_tx.local_keys.local_delayed_payment_key,
 			per_commitment_point: commitment_tx.local_keys.per_commitment_point,
 			feerate_per_kw: commitment_tx.feerate_per_kw,
 			htlc_outputs: htlc_outputs,

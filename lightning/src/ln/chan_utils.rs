@@ -227,12 +227,12 @@ pub fn derive_private_revocation_key<T: secp256k1::Signing>(secp_ctx: &Secp256k1
 		Sha256::from_engine(sha).into_inner()
 	};
 
-	let mut part_a = revocation_base_secret.clone();
-	part_a.mul_assign(&rev_append_commit_hash_key)?;
-	let mut part_b = per_commitment_secret.clone();
-	part_b.mul_assign(&commit_append_rev_hash_key)?;
-	part_a.add_assign(&part_b[..])?;
-	Ok(part_a)
+	let mut counterparty_contrib = revocation_base_secret.clone();
+	counterparty_contrib.mul_assign(&rev_append_commit_hash_key)?;
+	let mut our_contrib = per_commitment_secret.clone();
+	our_contrib.mul_assign(&commit_append_rev_hash_key)?;
+	counterparty_contrib.add_assign(&our_contrib[..])?;
+	Ok(counterparty_contrib)
 }
 
 /// Derives a per-commitment-transaction revocation public key from its constituent parts. This is
@@ -257,11 +257,11 @@ pub fn derive_public_revocation_key<T: secp256k1::Verification>(secp_ctx: &Secp2
 		Sha256::from_engine(sha).into_inner()
 	};
 
-	let mut part_a = revocation_base_point.clone();
-	part_a.mul_assign(&secp_ctx, &rev_append_commit_hash_key)?;
-	let mut part_b = per_commitment_point.clone();
-	part_b.mul_assign(&secp_ctx, &commit_append_rev_hash_key)?;
-	part_a.combine(&part_b)
+	let mut counterparty_contrib = revocation_base_point.clone();
+	counterparty_contrib.mul_assign(&secp_ctx, &rev_append_commit_hash_key)?;
+	let mut our_contrib = per_commitment_point.clone();
+	our_contrib.mul_assign(&secp_ctx, &commit_append_rev_hash_key)?;
+	counterparty_contrib.combine(&our_contrib)
 }
 
 /// The set of public keys which are used in the creation of one commitment transaction.
@@ -273,15 +273,15 @@ pub struct TxCreationKeys {
 	/// The revocation key which is used to allow the owner of the commitment transaction to
 	/// provide their counterparty the ability to punish them if they broadcast an old state.
 	pub(crate) revocation_key: PublicKey,
-	/// A's HTLC Key
-	pub(crate) a_htlc_key: PublicKey,
-	/// B's HTLC Key
-	pub(crate) b_htlc_key: PublicKey,
-	/// A's Payment Key (which isn't allowed to be spent from for some delay)
-	pub(crate) a_delayed_payment_key: PublicKey,
+	/// Local's HTLC Key
+	pub(crate) local_htlc_key: PublicKey,
+	/// Remote's HTLC Key
+	pub(crate) remote_htlc_key: PublicKey,
+	/// Local's Payment Key (which isn't allowed to be spent from for some delay)
+	pub(crate) local_delayed_payment_key: PublicKey,
 }
 impl_writeable!(TxCreationKeys, 33*6,
-	{ per_commitment_point, revocation_key, a_htlc_key, b_htlc_key, a_delayed_payment_key });
+	{ per_commitment_point, revocation_key, local_htlc_key, remote_htlc_key, local_delayed_payment_key });
 
 /// One counterparty's public keys which do not change over the life of a channel.
 #[derive(Clone, PartialEq)]
@@ -317,13 +317,13 @@ impl_writeable!(ChannelPublicKeys, 33*5, {
 
 
 impl TxCreationKeys {
-	pub(crate) fn new<T: secp256k1::Signing + secp256k1::Verification>(secp_ctx: &Secp256k1<T>, per_commitment_point: &PublicKey, a_delayed_payment_base: &PublicKey, a_htlc_base: &PublicKey, b_revocation_base: &PublicKey, b_htlc_base: &PublicKey) -> Result<TxCreationKeys, secp256k1::Error> {
+	pub(crate) fn new<T: secp256k1::Signing + secp256k1::Verification>(secp_ctx: &Secp256k1<T>, per_commitment_point: &PublicKey, local_delayed_payment_base: &PublicKey, local_htlc_base: &PublicKey, remote_revocation_base: &PublicKey, remote_htlc_base: &PublicKey) -> Result<TxCreationKeys, secp256k1::Error> {
 		Ok(TxCreationKeys {
 			per_commitment_point: per_commitment_point.clone(),
-			revocation_key: derive_public_revocation_key(&secp_ctx, &per_commitment_point, &b_revocation_base)?,
-			a_htlc_key: derive_public_key(&secp_ctx, &per_commitment_point, &a_htlc_base)?,
-			b_htlc_key: derive_public_key(&secp_ctx, &per_commitment_point, &b_htlc_base)?,
-			a_delayed_payment_key: derive_public_key(&secp_ctx, &per_commitment_point, &a_delayed_payment_base)?,
+			revocation_key: derive_public_revocation_key(&secp_ctx, &per_commitment_point, &remote_revocation_base)?,
+			local_htlc_key: derive_public_key(&secp_ctx, &per_commitment_point, &local_htlc_base)?,
+			remote_htlc_key: derive_public_key(&secp_ctx, &per_commitment_point, &remote_htlc_base)?,
+			local_delayed_payment_key: derive_public_key(&secp_ctx, &per_commitment_point, &local_delayed_payment_base)?,
 		})
 	}
 }
@@ -374,7 +374,7 @@ impl_writeable!(HTLCOutputInCommitment, 1 + 8 + 4 + 32 + 5, {
 });
 
 #[inline]
-pub(crate) fn get_htlc_redeemscript_with_explicit_keys(htlc: &HTLCOutputInCommitment, a_htlc_key: &PublicKey, b_htlc_key: &PublicKey, revocation_key: &PublicKey) -> Script {
+pub(crate) fn get_htlc_redeemscript_with_explicit_keys(htlc: &HTLCOutputInCommitment, local_htlc_key: &PublicKey, remote_htlc_key: &PublicKey, revocation_key: &PublicKey) -> Script {
 	let payment_hash160 = Ripemd160::hash(&htlc.payment_hash.0[..]).into_inner();
 	if htlc.offered {
 		Builder::new().push_opcode(opcodes::all::OP_DUP)
@@ -384,7 +384,7 @@ pub(crate) fn get_htlc_redeemscript_with_explicit_keys(htlc: &HTLCOutputInCommit
 		              .push_opcode(opcodes::all::OP_IF)
 		              .push_opcode(opcodes::all::OP_CHECKSIG)
 		              .push_opcode(opcodes::all::OP_ELSE)
-		              .push_slice(&b_htlc_key.serialize()[..])
+		              .push_slice(&remote_htlc_key.serialize()[..])
 		              .push_opcode(opcodes::all::OP_SWAP)
 		              .push_opcode(opcodes::all::OP_SIZE)
 		              .push_int(32)
@@ -393,7 +393,7 @@ pub(crate) fn get_htlc_redeemscript_with_explicit_keys(htlc: &HTLCOutputInCommit
 		              .push_opcode(opcodes::all::OP_DROP)
 		              .push_int(2)
 		              .push_opcode(opcodes::all::OP_SWAP)
-		              .push_slice(&a_htlc_key.serialize()[..])
+		              .push_slice(&local_htlc_key.serialize()[..])
 		              .push_int(2)
 		              .push_opcode(opcodes::all::OP_CHECKMULTISIG)
 		              .push_opcode(opcodes::all::OP_ELSE)
@@ -412,7 +412,7 @@ pub(crate) fn get_htlc_redeemscript_with_explicit_keys(htlc: &HTLCOutputInCommit
 		              .push_opcode(opcodes::all::OP_IF)
 		              .push_opcode(opcodes::all::OP_CHECKSIG)
 		              .push_opcode(opcodes::all::OP_ELSE)
-		              .push_slice(&b_htlc_key.serialize()[..])
+		              .push_slice(&remote_htlc_key.serialize()[..])
 		              .push_opcode(opcodes::all::OP_SWAP)
 		              .push_opcode(opcodes::all::OP_SIZE)
 		              .push_int(32)
@@ -423,7 +423,7 @@ pub(crate) fn get_htlc_redeemscript_with_explicit_keys(htlc: &HTLCOutputInCommit
 		              .push_opcode(opcodes::all::OP_EQUALVERIFY)
 		              .push_int(2)
 		              .push_opcode(opcodes::all::OP_SWAP)
-		              .push_slice(&a_htlc_key.serialize()[..])
+		              .push_slice(&local_htlc_key.serialize()[..])
 		              .push_int(2)
 		              .push_opcode(opcodes::all::OP_CHECKMULTISIG)
 		              .push_opcode(opcodes::all::OP_ELSE)
@@ -438,31 +438,31 @@ pub(crate) fn get_htlc_redeemscript_with_explicit_keys(htlc: &HTLCOutputInCommit
 	}
 }
 
-/// note here that 'a_revocation_key' is generated using b_revocation_basepoint and a's
+/// note here that 'revocation_key' is generated using remote_revocation_basepoint and local's
 /// commitment secret. 'htlc' does *not* need to have its previous_output_index filled.
 #[inline]
 pub fn get_htlc_redeemscript(htlc: &HTLCOutputInCommitment, keys: &TxCreationKeys) -> Script {
-	get_htlc_redeemscript_with_explicit_keys(htlc, &keys.a_htlc_key, &keys.b_htlc_key, &keys.revocation_key)
+	get_htlc_redeemscript_with_explicit_keys(htlc, &keys.local_htlc_key, &keys.remote_htlc_key, &keys.revocation_key)
 }
 
 /// Gets the redeemscript for a funding output from the two funding public keys.
 /// Note that the order of funding public keys does not matter.
-pub fn make_funding_redeemscript(a: &PublicKey, b: &PublicKey) -> Script {
-	let our_funding_key = a.serialize();
-	let their_funding_key = b.serialize();
+pub fn make_funding_redeemscript(local: &PublicKey, remote: &PublicKey) -> Script {
+	let local_funding_key = local.serialize();
+	let remote_funding_key = remote.serialize();
 
 	let builder = Builder::new().push_opcode(opcodes::all::OP_PUSHNUM_2);
-	if our_funding_key[..] < their_funding_key[..] {
-		builder.push_slice(&our_funding_key)
-			.push_slice(&their_funding_key)
+	if local_funding_key[..] < remote_funding_key[..] {
+		builder.push_slice(&local_funding_key)
+			.push_slice(&remote_funding_key)
 	} else {
-		builder.push_slice(&their_funding_key)
-			.push_slice(&our_funding_key)
+		builder.push_slice(&remote_funding_key)
+			.push_slice(&local_funding_key)
 	}.push_opcode(opcodes::all::OP_PUSHNUM_2).push_opcode(opcodes::all::OP_CHECKMULTISIG).into_script()
 }
 
 /// panics if htlc.transaction_output_index.is_none()!
-pub fn build_htlc_transaction(prev_hash: &Txid, feerate_per_kw: u64, to_self_delay: u16, htlc: &HTLCOutputInCommitment, a_delayed_payment_key: &PublicKey, revocation_key: &PublicKey) -> Transaction {
+pub fn build_htlc_transaction(prev_hash: &Txid, feerate_per_kw: u64, to_self_delay: u16, htlc: &HTLCOutputInCommitment, local_delayed_payment_key: &PublicKey, revocation_key: &PublicKey) -> Transaction {
 	let mut txins: Vec<TxIn> = Vec::new();
 	txins.push(TxIn {
 		previous_output: OutPoint {
@@ -482,7 +482,7 @@ pub fn build_htlc_transaction(prev_hash: &Txid, feerate_per_kw: u64, to_self_del
 
 	let mut txouts: Vec<TxOut> = Vec::new();
 	txouts.push(TxOut {
-		script_pubkey: get_revokeable_redeemscript(revocation_key, to_self_delay, a_delayed_payment_key).to_v0_p2wsh(),
+		script_pubkey: get_revokeable_redeemscript(revocation_key, to_self_delay, local_delayed_payment_key).to_v0_p2wsh(),
 		value: htlc.amount_msat / 1000 - total_fee //TODO: BOLT 3 does not specify if we should add amount_msat before dividing or if we should divide by 1000 before subtracting (as we do here)
 	});
 
@@ -550,9 +550,9 @@ impl LocalCommitmentTransaction {
 			local_keys: TxCreationKeys {
 					per_commitment_point: dummy_key.clone(),
 					revocation_key: dummy_key.clone(),
-					a_htlc_key: dummy_key.clone(),
-					b_htlc_key: dummy_key.clone(),
-					a_delayed_payment_key: dummy_key.clone(),
+					local_htlc_key: dummy_key.clone(),
+					remote_htlc_key: dummy_key.clone(),
+					local_delayed_payment_key: dummy_key.clone(),
 				},
 			feerate_per_kw: 0,
 			per_htlc: Vec::new()
@@ -627,9 +627,9 @@ impl LocalCommitmentTransaction {
 
 		for this_htlc in self.per_htlc.iter() {
 			if this_htlc.0.transaction_output_index.is_some() {
-				let htlc_tx = build_htlc_transaction(&txid, self.feerate_per_kw, local_csv, &this_htlc.0, &self.local_keys.a_delayed_payment_key, &self.local_keys.revocation_key);
+				let htlc_tx = build_htlc_transaction(&txid, self.feerate_per_kw, local_csv, &this_htlc.0, &self.local_keys.local_delayed_payment_key, &self.local_keys.revocation_key);
 
-				let htlc_redeemscript = get_htlc_redeemscript_with_explicit_keys(&this_htlc.0, &self.local_keys.a_htlc_key, &self.local_keys.b_htlc_key, &self.local_keys.revocation_key);
+				let htlc_redeemscript = get_htlc_redeemscript_with_explicit_keys(&this_htlc.0, &self.local_keys.local_htlc_key, &self.local_keys.remote_htlc_key, &self.local_keys.revocation_key);
 
 				let sighash = hash_to_message!(&bip143::SighashComponents::new(&htlc_tx).sighash_all(&htlc_tx.input[0], &htlc_redeemscript, this_htlc.0.amount_msat / 1000)[..]);
 				ret.push(Some(secp_ctx.sign(&sighash, &our_htlc_key)));
@@ -650,12 +650,12 @@ impl LocalCommitmentTransaction {
 		// Further, we should never be provided the preimage for an HTLC-Timeout transaction.
 		if  this_htlc.0.offered && preimage.is_some() { unreachable!(); }
 
-		let mut htlc_tx = build_htlc_transaction(&txid, self.feerate_per_kw, local_csv, &this_htlc.0, &self.local_keys.a_delayed_payment_key, &self.local_keys.revocation_key);
+		let mut htlc_tx = build_htlc_transaction(&txid, self.feerate_per_kw, local_csv, &this_htlc.0, &self.local_keys.local_delayed_payment_key, &self.local_keys.revocation_key);
 		// Channel should have checked that we have a remote signature for this HTLC at
 		// creation, and we should have a sensible htlc transaction:
 		assert!(this_htlc.1.is_some());
 
-		let htlc_redeemscript = get_htlc_redeemscript_with_explicit_keys(&this_htlc.0, &self.local_keys.a_htlc_key, &self.local_keys.b_htlc_key, &self.local_keys.revocation_key);
+		let htlc_redeemscript = get_htlc_redeemscript_with_explicit_keys(&this_htlc.0, &self.local_keys.local_htlc_key, &self.local_keys.remote_htlc_key, &self.local_keys.revocation_key);
 
 		// First push the multisig dummy, note that due to BIP147 (NULLDUMMY) it must be a zero-length element.
 		htlc_tx.input[0].witness.push(Vec::new());

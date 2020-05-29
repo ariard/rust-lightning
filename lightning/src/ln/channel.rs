@@ -963,7 +963,7 @@ impl<ChanSigner: ChannelKeys> Channel<ChanSigner> {
 			txouts.push((TxOut {
 				script_pubkey: chan_utils::get_revokeable_redeemscript(&keys.revocation_key,
 				                                                       if local { self.their_to_self_delay } else { self.our_to_self_delay },
-				                                                       &keys.a_delayed_payment_key).to_v0_p2wsh(),
+				                                                       &keys.local_delayed_payment_key).to_v0_p2wsh(),
 				value: value_to_a as u64
 			}, None));
 		}
@@ -1126,7 +1126,7 @@ impl<ChanSigner: ChannelKeys> Channel<ChanSigner> {
 	/// @local is used only to convert relevant internal structures which refer to remote vs local
 	/// to decide value of outputs and direction of HTLCs.
 	fn build_htlc_transaction(&self, prev_hash: &Txid, htlc: &HTLCOutputInCommitment, local: bool, keys: &TxCreationKeys, feerate_per_kw: u64) -> Transaction {
-		chan_utils::build_htlc_transaction(prev_hash, feerate_per_kw, if local { self.their_to_self_delay } else { self.our_to_self_delay }, htlc, &keys.a_delayed_payment_key, &keys.revocation_key)
+		chan_utils::build_htlc_transaction(prev_hash, feerate_per_kw, if local { self.their_to_self_delay } else { self.our_to_self_delay }, htlc, &keys.local_delayed_payment_key, &keys.revocation_key)
 	}
 
 	/// Per HTLC, only one get_update_fail_htlc or get_update_fulfill_htlc call may be made.
@@ -1861,8 +1861,8 @@ impl<ChanSigner: ChannelKeys> Channel<ChanSigner> {
 				let htlc_tx = self.build_htlc_transaction(&local_commitment_txid, &htlc, true, &local_keys, feerate_per_kw);
 				let htlc_redeemscript = chan_utils::get_htlc_redeemscript(&htlc, &local_keys);
 				let htlc_sighash = hash_to_message!(&bip143::SighashComponents::new(&htlc_tx).sighash_all(&htlc_tx.input[0], &htlc_redeemscript, htlc.amount_msat / 1000)[..]);
-				log_trace!(logger, "Checking HTLC tx signature {} by key {} against tx {} (sighash {}) with redeemscript {}", log_bytes!(msg.htlc_signatures[idx].serialize_compact()[..]), log_bytes!(local_keys.b_htlc_key.serialize()), encode::serialize_hex(&htlc_tx), log_bytes!(htlc_sighash[..]), encode::serialize_hex(&htlc_redeemscript));
-				if let Err(_) = self.secp_ctx.verify(&htlc_sighash, &msg.htlc_signatures[idx], &local_keys.b_htlc_key) {
+				log_trace!(logger, "Checking HTLC tx signature {} by key {} against tx {} (sighash {}) with redeemscript {}", log_bytes!(msg.htlc_signatures[idx].serialize_compact()[..]), log_bytes!(local_keys.remote_htlc_key.serialize()), encode::serialize_hex(&htlc_tx), log_bytes!(htlc_sighash[..]), encode::serialize_hex(&htlc_redeemscript));
+				if let Err(_) = self.secp_ctx.verify(&htlc_sighash, &msg.htlc_signatures[idx], &local_keys.remote_htlc_key) {
 					return Err((None, ChannelError::Close("Invalid HTLC tx signature from peer")));
 				}
 				htlcs_without_source.push((htlc.clone(), Some(msg.htlc_signatures[idx])));
@@ -3700,9 +3700,9 @@ impl<ChanSigner: ChannelKeys> Channel<ChanSigner> {
 
 			for (ref htlc_sig, ref htlc) in htlc_signatures.iter().zip(htlcs) {
 				log_trace!(logger, "Signed remote HTLC tx {} with redeemscript {} with pubkey {} -> {}",
-					encode::serialize_hex(&chan_utils::build_htlc_transaction(&remote_commitment_tx.0.txid(), feerate_per_kw, self.our_to_self_delay, htlc, &remote_keys.a_delayed_payment_key, &remote_keys.revocation_key)),
+					encode::serialize_hex(&chan_utils::build_htlc_transaction(&remote_commitment_tx.0.txid(), feerate_per_kw, self.our_to_self_delay, htlc, &remote_keys.local_delayed_payment_key, &remote_keys.revocation_key)),
 					encode::serialize_hex(&chan_utils::get_htlc_redeemscript(&htlc, &remote_keys)),
-					log_bytes!(remote_keys.a_htlc_key.serialize()),
+					log_bytes!(remote_keys.local_htlc_key.serialize()),
 					log_bytes!(htlc_sig.serialize_compact()[..]));
 			}
 		}
@@ -4528,7 +4528,7 @@ mod tests {
 					let htlc_tx = chan.build_htlc_transaction(&unsigned_tx.0.txid(), &htlc, true, &keys, chan.feerate_per_kw);
 					let htlc_redeemscript = chan_utils::get_htlc_redeemscript(&htlc, &keys);
 					let htlc_sighash = Message::from_slice(&bip143::SighashComponents::new(&htlc_tx).sighash_all(&htlc_tx.input[0], &htlc_redeemscript, htlc.amount_msat / 1000)[..]).unwrap();
-					secp_ctx.verify(&htlc_sighash, &remote_signature, &keys.b_htlc_key).unwrap();
+					secp_ctx.verify(&htlc_sighash, &remote_signature, &keys.remote_htlc_key).unwrap();
 
 					let mut preimage: Option<PaymentPreimage> = None;
 					if !htlc.offered {
