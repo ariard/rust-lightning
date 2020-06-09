@@ -1735,6 +1735,12 @@ impl<ChanSigner: ChannelKeys> Channel<ChanSigner> {
 
 	pub fn update_add_htlc<F>(&mut self, msg: &msgs::UpdateAddHTLC, mut pending_forward_state: PendingHTLCStatus, create_pending_htlc_status: F) -> Result<(), ChannelError>
 	where F: for<'a> Fn(&'a Self, PendingHTLCStatus, u16) -> PendingHTLCStatus {
+
+		/* HTLC reception must be sanitize with regards to different class of checks. Each
+		 * of them can be classified according if they depend of Channel-context, HTLC-context
+		 * with static Channel-context or HTLC-context with dynamic Channel-context.
+		 * 1) Channel-Context-only checks : channel state and connection liveness checks
+		 */
 		if !self.is_usable() {
 			// TODO: Note that |20 is defined as "channel FROM the processing
 			// node has been disabled" (emphasis mine), which seems to imply
@@ -1751,6 +1757,16 @@ impl<ChanSigner: ChannelKeys> Channel<ChanSigner> {
 		if self.channel_state & (ChannelState::PeerDisconnected as u32) == ChannelState::PeerDisconnected as u32 {
 			return Err(ChannelError::Close("Peer sent update_add_htlc when we needed a channel_reestablish"));
 		}
+		if self.channel_state & ChannelState::LocalShutdownSent as u32 != 0 {
+			if let PendingHTLCStatus::Forward(_) = pending_forward_state {
+				panic!("ChannelManager shouldn't be trying to add a forwardable HTLC after we've started closing");
+			}
+		}
+
+		/* 2) HTLC-Context with regards to static Channel-context. Static Channel-context
+		 * is interpreted as channel parameters negotiated at opening and immutable for
+		 * the lifetime of channel.
+		 */
 		if msg.amount_msat > self.channel_value_satoshis * 1000 {
 			return Err(ChannelError::Close("Remote side tried to send more than the total value of the channel"));
 		}
@@ -1760,27 +1776,47 @@ impl<ChanSigner: ChannelKeys> Channel<ChanSigner> {
 		if msg.amount_msat < self.our_htlc_minimum_msat {
 			return Err(ChannelError::Close("Remote side tried to send less than our minimum HTLC value"));
 		}
+		if msg.cltv_expiry >= 500000000 {
+			return Err(ChannelError::Close("Remote provided CLTV expiry in seconds instead of block height"));
+		}
+
+		/* 3) HTLC-Context with regatds to dynamic Channel-context. Validity of HTLC is
+		 * dependent of previous HTLC operations which is dynamically updating balances.
+		 * A HTLC can be sane in *itself* but its acceptance would violate a channel policy
+		 * parameters
+		 */
 
 		let (inbound_htlc_count, htlc_inbound_value_msat) = self.get_inbound_pending_htlc_stats();
 		if inbound_htlc_count + 1 > OUR_MAX_HTLCS as u32 {
 			return Err(ChannelError::Close("Remote tried to push more than our max accepted HTLCs"));
 		}
+
 		// Check our_max_htlc_value_in_flight_msat
 		if htlc_inbound_value_msat + msg.amount_msat > Channel::<ChanSigner>::get_our_max_htlc_value_in_flight_msat(self.channel_value_satoshis) {
 			return Err(ChannelError::Close("Remote HTLC add would put them over our max HTLC value"));
 		}
-		// Check remote_channel_reserve_satoshis (we're getting paid, so they have to at least meet
-		// the reserve_satoshis we told them to always have as direct payment so that they lose
-		// something if we punish them for broadcasting an old state).
-		// Note that we don't really care about having a small/no to_remote output in our local
-		// commitment transactions, as the purpose of the channel reserve is to ensure we can
-		// punish *them* if they misbehave, so we discount any outbound HTLCs which will not be
-		// present in the next commitment transaction we send them (at least for fulfilled ones,
-		// failed ones won't modify value_to_self).
-		// Note that we will send HTLCs which another instance of rust-lightning would think
-		// violate the reserve value if we do not do this (as we forget inbound HTLCs from the
-		// Channel state once they will not be present in the next received commitment
-		// transaction).
+
+		// To apply channel policy with regards to channel reserve and fee buffer spikes,
+		// beyond tracking counterparty and  our direct balances (`to_local`/`to_remote`
+		// outputs) requires to account for in-flight HTLCs. Accounting must be exact for
+		// the *next* pair of commitment transactions, i.e after potential application of
+		// update.
+		//
+		// Channel_reserve_satoshis must be strictly enforced to ensure counterparty has
+		// always a substantial stake to loss and thus dicentivize broadcasting a revoked
+		// state. Such misbehaving broadcast will be punish by us by claiming the whole
+		// channel value. Based on this consideration, *our* security doesn't require
+		// that a `to_remote` output is substantial enough on our local commitment
+		// transaction.
+		//
+		// Any inbound HTLC (either an offered output on counterparty's commitment or a
+		// received output on our's commitment), after its announcement from our
+		// counterparty is accounted in our balance. Independently of its state
+		// (fully-committed, announced failed, ...) or owning a satisfying witness for it.
+		//
+		// Any outbound HTLC (either a received output on counterparty's or a offered output
+		// on our's commitment), after its announcement from us is accounted in their
+		// balance, unless they announce its removal.
 		let mut removed_outbound_total_msat = 0;
 		for ref htlc in self.pending_outbound_htlcs.iter() {
 			if let OutboundHTLCState::AwaitingRemoteRevokeToRemove(None) = htlc.state {
@@ -1833,15 +1869,6 @@ impl<ChanSigner: ChannelKeys> Channel<ChanSigner> {
 
 		if self.next_remote_htlc_id != msg.htlc_id {
 			return Err(ChannelError::Close("Remote skipped HTLC ID"));
-		}
-		if msg.cltv_expiry >= 500000000 {
-			return Err(ChannelError::Close("Remote provided CLTV expiry in seconds instead of block height"));
-		}
-
-		if self.channel_state & ChannelState::LocalShutdownSent as u32 != 0 {
-			if let PendingHTLCStatus::Forward(_) = pending_forward_state {
-				panic!("ChannelManager shouldn't be trying to add a forwardable HTLC after we've started closing");
-			}
 		}
 
 		// Now update local state:
