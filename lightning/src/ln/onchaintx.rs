@@ -546,9 +546,10 @@ impl<ChanSigner: ChannelKeys> OnchainTxHandler<ChanSigner> {
 						} else { // If false, generate new claim request with update outpoint set
 							let mut at_least_one_drop = false;
 							for input in tx.input.iter() {
-								let package = claim_material.package_template.package_split(&input.previous_output);
-								claimed_outputs_material.push(package);
-								at_least_one_drop = true;
+								if let Some(package) = claim_material.package_template.package_split(&input.previous_output) {
+									claimed_outputs_material.push(package);
+									at_least_one_drop = true;
+								}
 								// If there are no outpoints left to claim in this request, drop it entirely after ANTI_REORG_DELAY.
 								if claim_material.package_template.outpoints().is_empty() {
 									clean_claim_request_after_safety_delay!();

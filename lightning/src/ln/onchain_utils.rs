@@ -280,11 +280,9 @@ impl PackageTemplate {
 	pub(crate) fn outpoints(&self) -> Vec<&BitcoinOutPoint> {
 		match self {
 			PackageTemplate::MalleableJusticeTx { ref inputs } => {
-				assert_ne!(inputs.len(), 0);
 				inputs.keys().collect()
 			},
 			PackageTemplate::RemoteHTLCTx { ref inputs } => {
-				assert_ne!(inputs.len(), 0);
 				inputs.keys().collect()
 			},
 			PackageTemplate::LocalHTLCTx { ref input } => {
@@ -299,29 +297,37 @@ impl PackageTemplate {
 			},
 		}
 	}
-	pub(crate) fn package_split(&mut self, outp: &BitcoinOutPoint) -> PackageTemplate {
-		let package = match self {
+	pub(crate) fn package_split(&mut self, outp: &BitcoinOutPoint) -> Option<PackageTemplate> {
+		match self {
 			PackageTemplate::MalleableJusticeTx { ref mut inputs } => {
-				assert_ne!(inputs.len(), 0);
-				let removed = inputs.remove(outp).unwrap();
-				let mut input_splitted = HashMap::with_capacity(1);
-				input_splitted.insert(*outp, removed);
-				PackageTemplate::MalleableJusticeTx {
-					inputs: input_splitted,
+				if let Some(removed) = inputs.remove(outp) {
+					let mut input_splitted = HashMap::with_capacity(1);
+					input_splitted.insert(*outp, removed);
+					return Some(PackageTemplate::MalleableJusticeTx {
+						inputs: input_splitted,
+					});
 				}
+				None
 			},
 			PackageTemplate::RemoteHTLCTx { ref mut inputs } => {
-				assert_ne!(inputs.len(), 0);
-				let removed = inputs.remove(outp).unwrap();
-				let mut input_splitted = HashMap::with_capacity(1);
-				input_splitted.insert(*outp, removed);
-				PackageTemplate::RemoteHTLCTx {
-					inputs: input_splitted,
+				if let Some(removed) = inputs.remove(outp) {
+					let mut input_splitted = HashMap::with_capacity(1);
+					input_splitted.insert(*outp, removed);
+					return Some(PackageTemplate::RemoteHTLCTx {
+						inputs: input_splitted,
+					});
 				}
+				None
 			},
-			_ => panic!("Removing outpoints from non-malleable packages")
-		};
-		package
+			_ => {
+				// Note, we may try to split on remote transaction for
+				// which we don't have a competing one (HTLC-Success before
+				// timelock expiration). This explain we don't panic!.
+				// We should refactor OnchainTxHandler::block_connected to
+				// only test equality on competing claims.
+				return None;
+			}
+		}
 	}
 	pub(crate) fn package_merge(&mut self, mut template: PackageTemplate) {
 		match self {
@@ -413,7 +419,7 @@ impl PackageTemplate {
 		};
 		bumped_tx.get_weight() + witnesses_weight
 	}
-	pub(crate) fn package_finalize<L: Deref, ChanSigner: ChannelKeys>(&self, onchain_handler: &mut OnchainTxHandler<ChanSigner>, amount: u64, destination_script: Script, logger: &L) -> Option<Transaction>
+	pub(crate) fn package_finalize<L: Deref, ChanSigner: ChannelKeys>(&self, onchain_handler: &mut OnchainTxHandler<ChanSigner>, value: u64, destination_script: Script, logger: &L) -> Option<Transaction>
 		where L::Target: Logger,
 	{
 		let mut bumped_tx = Transaction {
@@ -422,7 +428,7 @@ impl PackageTemplate {
 			input: vec![],
 			output: vec![TxOut {
 				script_pubkey: destination_script,
-				value: 0
+				value,
 			}],
 		};
 		match self {
@@ -444,7 +450,7 @@ impl PackageTemplate {
 							chan_utils::get_revokeable_redeemscript(&chan_keys.revocation_key, revk.on_remote_tx_csv, &chan_keys.local_delayed_payment_key)
 						};
 
-						if let Ok(sig) = onchain_handler.key_storage.sign_justice_transaction(&bumped_tx, i, amount, &revk.per_commitment_key, &revk.htlc, revk.on_remote_tx_csv, &onchain_handler.secp_ctx) {
+						if let Ok(sig) = onchain_handler.key_storage.sign_justice_transaction(&bumped_tx, i, revk.amount, &revk.per_commitment_key, &revk.htlc, revk.on_remote_tx_csv, &onchain_handler.secp_ctx) {
 							bumped_tx.input[i].witness.push(sig.serialize_der().to_vec());
 							bumped_tx.input[i].witness[0].push(SigHashType::All as u8);
 							if revk.htlc.is_some() {
@@ -558,6 +564,14 @@ impl PackageTemplate {
 	}
 }
 
+impl Default for PackageTemplate {
+	fn default() -> Self {
+		PackageTemplate::MalleableJusticeTx {
+			inputs: HashMap::new(),
+		}
+	}
+}
+
 impl Writeable for PackageTemplate {
 	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), ::std::io::Error> {
 		match self {
@@ -636,5 +650,154 @@ impl Readable for PackageTemplate {
 			_ => return Err(DecodeError::InvalidValue),
 		};
 		Ok(package)
+	}
+}
+
+/// BumpStrategy is a basic enum to encode a fee-committing strategy. We
+/// may extend it in the future with other stategies like BYOF-input.
+#[derive(PartialEq, Clone)]
+pub(crate) enum BumpStrategy {
+	RBF,
+	CPFP
+}
+
+impl Writeable for BumpStrategy {
+	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), ::std::io::Error> {
+		match self {
+			BumpStrategy::RBF => {
+				writer.write_all(&[0; 1])?;
+			},
+			BumpStrategy::CPFP => {
+				writer.write_all(&[1; 1])?;
+			}
+		}
+		Ok(())
+	}
+}
+
+impl Readable for BumpStrategy {
+	fn read<R: ::std::io::Read>(reader: &mut R) -> Result<Self, DecodeError> {
+		let bump_strategy = match <u8 as Readable>::read(reader)? {
+			0 => {
+				BumpStrategy::RBF
+			},
+			1 => {
+				BumpStrategy::CPFP
+			},
+			_ => return Err(DecodeError::InvalidValue),
+		};
+		Ok(bump_strategy)
+	}
+}
+
+/// A structure to describe a claim content and its metadatas which is generated
+/// by ChannelMonitor and used by OnchainTxHandler to generate feerate-competive
+/// transactions.
+///
+/// Metadatas are related to multiple fields playing a role in packet lifetime.
+/// Once issued, it may be aggregated with other requests if it's judged safe
+/// and feerate opportunistic.
+/// Current LN fees model, pre-committed fees with update_fee adjustement, means
+/// that counter-signed transactions must be CPFP to be dynamically confirmed as a
+/// bumping strategy. If transactions aren't lockdown (i.e justice transactions) we
+/// may RBF them.
+/// Feerate previous will serve as a feerate floor between different bumping attempts.
+/// Height timer clocks these different bumping attempts.
+/// Absolute timelock defines the block barrier at which claiming isn't exclusive
+/// to us anymore and thus we MUST have get it solved before.
+/// Height original serves as a packet timestamps to prune out claim in case of reorg.
+/// Content embeds transactions elements to generate transaction. See PackageTemplate.
+#[derive(PartialEq, Clone)]
+pub struct OnchainRequest {
+	// Timeout tx must have nLocktime set which means aggregating multiple
+	// ones must take the higher nLocktime among them to satisfy all of them.
+	// Sadly it has few pitfalls, a) it takes longuer to get fund back b) CLTV_DELTA
+	// of a sooner-HTLC could be swallowed by the highest nLocktime of the HTLC set.
+	// Do simplify we mark them as non-aggregable.
+	pub(crate) aggregation: bool,
+	// Content may lockdown with counter-signature of our counterparty
+	// or fully-malleable by our own. Depending on this bumping strategy
+	// must be adapted.
+	pub(crate) bump_strategy: BumpStrategy,
+	// Based feerate of previous broadcast. If resources available (either
+	// output value or utxo bumping).
+	pub(crate) feerate_previous: u64,
+	// At every block tick, used to check if pending claiming tx is taking too
+	// much time for confirmation and we need to bump it.
+	pub(crate) height_timer: Option<u32>,
+	// Block height before which claiming is exclusive to one party,
+	// after reaching it, claiming may be contentious.
+	pub(crate) absolute_timelock: u32,
+	// Tracked in case of reorg to wipe out now-superflous request.
+	pub(crate) height_original: u32,
+	// Content of request.
+	pub(crate) content: PackageTemplate,
+}
+
+impl OnchainRequest {
+	pub(crate) fn request_merge(&mut self, req: OnchainRequest) {
+		// We init default onchain request with first merge content
+		if self.absolute_timelock == ::std::u32::MAX {
+			println!("Init merging {}", req.height_original);
+			self.height_original = req.height_original;
+			self.content = req.content;
+			self.absolute_timelock = req.absolute_timelock;
+			return;
+		}
+		assert_eq!(self.height_original, req.height_original);
+		if self.absolute_timelock > req.absolute_timelock {
+			self.absolute_timelock = req.absolute_timelock;
+		}
+		self.content.package_merge(req.content);
+	}
+}
+
+impl Default for OnchainRequest {
+	fn default() -> Self {
+		OnchainRequest {
+			aggregation: true,
+			bump_strategy: BumpStrategy::RBF,
+			feerate_previous: 0,
+			height_timer: None,
+			absolute_timelock: ::std::u32::MAX,
+			height_original: 0,
+			content: PackageTemplate::default()
+		}
+	}
+}
+
+impl Writeable for OnchainRequest {
+	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), ::std::io::Error> {
+		self.aggregation.write(writer)?;
+		self.bump_strategy.write(writer)?;
+		self.feerate_previous.write(writer)?;
+		self.height_timer.write(writer)?;
+		self.absolute_timelock.write(writer)?;
+		self.height_original.write(writer)?;
+		self.content.write(writer)?;
+
+		Ok(())
+	}
+}
+
+impl Readable for OnchainRequest {
+	fn read<R: ::std::io::Read>(reader: &mut R) -> Result<Self, DecodeError> {
+		let aggregation = Readable::read(reader)?;
+		let bump_strategy = Readable::read(reader)?;
+		let feerate_previous = Readable::read(reader)?;
+		let height_timer = Readable::read(reader)?;
+		let absolute_timelock = Readable::read(reader)?;
+		let height_original = Readable::read(reader)?;
+		let content = Readable::read(reader)?;
+
+		Ok(OnchainRequest {
+			aggregation,
+			bump_strategy,
+			feerate_previous,
+			height_timer,
+			absolute_timelock,
+			height_original,
+			content
+		})
 	}
 }
