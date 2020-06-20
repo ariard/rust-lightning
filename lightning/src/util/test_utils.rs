@@ -1,5 +1,6 @@
 use chain::chaininterface;
 use chain::chaininterface::{ConfirmationTarget, ChainError, ChainWatchInterface};
+use chain::utxointerface::UtxoPool;
 use chain::transaction::OutPoint;
 use chain::keysinterface;
 use ln::channelmonitor;
@@ -13,7 +14,7 @@ use util::ser::{Readable, Writer, Writeable};
 
 use bitcoin::BitcoinHash;
 use bitcoin::blockdata::constants::genesis_block;
-use bitcoin::blockdata::transaction::Transaction;
+use bitcoin::blockdata::transaction::{Transaction, TxOut, OutPoint as BitcoinOutPoint};
 use bitcoin::blockdata::script::{Builder, Script};
 use bitcoin::blockdata::block::Block;
 use bitcoin::blockdata::opcodes;
@@ -48,21 +49,36 @@ impl chaininterface::FeeEstimator for TestFeeEstimator {
 	}
 }
 
+pub struct TestPool {}
+
+impl UtxoPool for TestPool {
+	fn map_utxo(&self, channel_provision: u64) {}
+	fn allocate_utxo(&self, required_fee: u64) -> Option<(BitcoinOutPoint, TxOut)> { None }
+	fn free_utxo(&self, free_utxo: BitcoinOutPoint) {}
+	fn sign_utxo(&self, cpfp_transaction: &mut Transaction, utxo_index: u32) {}
+}
+
+impl TestPool {
+	pub fn new() -> Self {
+		TestPool {}
+	}
+}
+
 pub struct TestChannelMonitor<'a> {
 	pub added_monitors: Mutex<Vec<(OutPoint, channelmonitor::ChannelMonitor<EnforcingChannelKeys>)>>,
 	pub latest_monitor_update_id: Mutex<HashMap<[u8; 32], (OutPoint, u64)>>,
-	pub simple_monitor: channelmonitor::SimpleManyChannelMonitor<OutPoint, EnforcingChannelKeys, &'a chaininterface::BroadcasterInterface, &'a TestFeeEstimator, &'a TestLogger, &'a ChainWatchInterface>,
+	pub simple_monitor: channelmonitor::SimpleManyChannelMonitor<OutPoint, EnforcingChannelKeys, &'a chaininterface::BroadcasterInterface, &'a TestFeeEstimator, &'a TestLogger, &'a ChainWatchInterface, &'a UtxoPool>,
 	pub update_ret: Mutex<Result<(), channelmonitor::ChannelMonitorUpdateErr>>,
 	// If this is set to Some(), after the next return, we'll always return this until update_ret
 	// is changed:
 	pub next_update_ret: Mutex<Option<Result<(), channelmonitor::ChannelMonitorUpdateErr>>>,
 }
 impl<'a> TestChannelMonitor<'a> {
-	pub fn new(chain_monitor: &'a chaininterface::ChainWatchInterface, broadcaster: &'a chaininterface::BroadcasterInterface, logger: &'a TestLogger, fee_estimator: &'a TestFeeEstimator) -> Self {
+	pub fn new(chain_monitor: &'a chaininterface::ChainWatchInterface, broadcaster: &'a chaininterface::BroadcasterInterface, logger: &'a TestLogger, fee_estimator: &'a TestFeeEstimator, utxo_pool: &'a UtxoPool) -> Self {
 		Self {
 			added_monitors: Mutex::new(Vec::new()),
 			latest_monitor_update_id: Mutex::new(HashMap::new()),
-			simple_monitor: channelmonitor::SimpleManyChannelMonitor::new(chain_monitor, broadcaster, logger, fee_estimator),
+			simple_monitor: channelmonitor::SimpleManyChannelMonitor::new(chain_monitor, broadcaster, logger, fee_estimator, utxo_pool),
 			update_ret: Mutex::new(Ok(())),
 			next_update_ret: Mutex::new(None),
 		}
