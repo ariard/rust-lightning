@@ -974,8 +974,7 @@ impl<ChanSigner: ChannelKeys> Channel<ChanSigner> {
 			(self.counterparty_pubkeys.as_ref().unwrap().funding_pubkey, self.keys.pubkeys().funding_pubkey)
 		};
 
-		//XXX integrate scriptpubkeys, add local_keys, remote_keys
-		//XXX CPFP them + basic_test
+		//XXX detect our anchor + build CPFP + feed an utxo in test + basic_test
 		if value_to_a >= (dust_limit_satoshis as i64) {
 			log_trace!(logger, "   ...including {} output with value {}", if !building_for_counterparty { "to_local" } else { "to_remote" }, value_to_a);
 			txouts.push((TxOut {
