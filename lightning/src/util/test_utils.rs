@@ -7,6 +7,7 @@ use ln::channelmonitor;
 use ln::features::{ChannelFeatures, InitFeatures};
 use ln::msgs;
 use ln::channelmonitor::HTLCUpdate;
+use ln::onchain_utils::BumpingOutput;
 use util::enforcing_trait_impls::EnforcingChannelKeys;
 use util::events;
 use util::logger::{Logger, Level, Record};
@@ -18,6 +19,7 @@ use bitcoin::blockdata::transaction::{Transaction, TxOut, OutPoint as BitcoinOut
 use bitcoin::blockdata::script::{Builder, Script};
 use bitcoin::blockdata::block::Block;
 use bitcoin::blockdata::opcodes;
+use bitcoin::hashes::hex::FromHex;
 use bitcoin::network::constants::Network;
 use bitcoin::hash_types::{Txid, BlockHash};
 
@@ -49,18 +51,28 @@ impl chaininterface::FeeEstimator for TestFeeEstimator {
 	}
 }
 
-pub struct TestPool {}
+pub struct TestPool {
+	utxo_available: Vec<(BitcoinOutPoint, BumpingOutput)>,
+}
 
 impl UtxoPool for TestPool {
 	fn map_utxo(&self, channel_provision: u64) {}
-	fn allocate_utxo(&self, required_fee: u64) -> Option<(BitcoinOutPoint, TxOut)> { None }
+	fn allocate_utxo(&self, required_fee: u64) -> Option<(BitcoinOutPoint, BumpingOutput)> { None }
 	fn free_utxo(&self, free_utxo: BitcoinOutPoint) {}
 	fn sign_utxo(&self, cpfp_transaction: &mut Transaction, utxo_index: u32) {}
 }
 
 impl TestPool {
 	pub fn new() -> Self {
-		TestPool {}
+		let outp = BitcoinOutPoint {
+			txid: Txid::from_hex("56944c5d3f98413ef45cf54545538103cc9f298e0575820ad3591376e2e0f64a").unwrap(),
+			vout: 0,
+		};
+		let bumping = BumpingOutput::new(1_000_000, 440);
+		let utxo_available = vec![(outp, bumping)];
+		TestPool {
+			utxo_available,
+		}
 	}
 }
 

@@ -3,7 +3,9 @@
 
 
 use bitcoin::blockdata::transaction::OutPoint as BitcoinOutPoint;
-use bitcoin::blockdata::transaction::{TxOut, Transaction};
+use bitcoin::blockdata::transaction::Transaction;
+
+use ln::onchain_utils::BumpingOutput;
 
 /// A trait which sould be implemented to provide fresh CPFP utxo for onchain
 /// transactions.
@@ -18,7 +20,7 @@ pub trait UtxoPool: Sync + Send {
 	fn map_utxo(&self, channel_provision: u64);
 	//XXX: document better
 	/// Allocate a utxo to cover fee required to confirm a pending onchain transaction.
-	fn allocate_utxo(&self, required_fee: u64) -> Option<(BitcoinOutPoint, TxOut)>;
+	fn allocate_utxo(&self, required_fee: u64) -> Option<(BitcoinOutPoint, BumpingOutput)>;
 	//XXX: document better
 	/// Free a utxo. Call in case of reorg or counterparty claiming the output first.
 	fn free_utxo(&self, free_utxo: BitcoinOutPoint);
