@@ -409,11 +409,16 @@ impl PackageTemplate {
 				}
 				amounts
 			},
+			PackageTemplate::LocalCommitmentTx { ref utxo_input, .. } => {
+				if let Some(utxo_input) = utxo_input {
+					return utxo_input.1.amount;
+				} else { panic!("Bug logic, a utxo should have been allocated"); }
+			},
 			_ => 0,
 		};
 		amounts
 	}
-	pub(crate) fn package_weight(&self, destination_script: &Script) -> usize {
+	pub(crate) fn package_weight(&self, destination_script: &Script, local_commitment: &Transaction) -> usize {
 		let mut input = Vec::new();
 		let witnesses_weight = match self {
 			PackageTemplate::MalleableJusticeTx { ref inputs } => {
@@ -442,6 +447,16 @@ impl PackageTemplate {
 					weight += get_witnesses_weight(if outp.preimage.is_some() { &[InputDescriptors::OfferedHTLC] } else { &[InputDescriptors::ReceivedHTLC] });
 				}
 				weight
+			},
+			PackageTemplate::LocalCommitmentTx { .. } => {
+				// We account:
+				// - one cpfp tx, 2-inputs, 1-output (`destinatiion_script`) (129 WU)
+				// - bumping utxo input P2WPKH witness (110 WU)
+				// - anchor input P2WSH witness (115 WU)
+				// - pre-signed commitment tx + P2WSH witness (224 WU)
+				let commitment_weight = local_commitment.get_weight() + 224;
+				let cpfp_weight = 129 + 110 + 115;
+				return commitment_weight + cpfp_weight;
 			},
 			_ => { return 0 }
 		};

@@ -309,20 +309,16 @@ impl<ChanSigner: ChannelKeys> OnchainTxHandler<ChanSigner> {
 		// didn't receive confirmation of it before, or not enough reorg-safe depth on top of it).
 		let new_timer = Some(Self::get_height_timer(height, cached_request.absolute_timelock));
 		let mut amt = cached_request.content.package_amounts();
-		if cached_request.bump_strategy == BumpStrategy::RBF {
-			let predicted_weight = cached_request.content.package_weight(&self.destination_script);
-			if let Some((output_value, new_feerate)) = onchain_utils::compute_output_value(predicted_weight, amt, cached_request.feerate_previous, &fee_estimator, &logger) {
-				assert!(new_feerate != 0);
+		let local_commitment = self.local_commitment.as_ref().unwrap();
+		let predicted_weight = cached_request.content.package_weight(&self.destination_script, &local_commitment.unsigned_tx);
+		//XXX: predicted weight must include bump utxo spend and input
+		if let Some((output_value, new_feerate)) = onchain_utils::compute_output_value(predicted_weight, amt, cached_request.feerate_previous, &fee_estimator, &logger) {
+			assert!(new_feerate != 0);
 
-				let transaction = cached_request.content.package_finalize(self, output_value, self.destination_script.clone(), &logger).unwrap();
-				log_trace!(logger, "...with timer {} and feerate {}", new_timer.unwrap(), new_feerate);
-				assert!(predicted_weight >= transaction.get_weight());
-				return Some((new_timer, new_feerate, transaction))
-			}
-		} else {
-			if let Some(transaction) = cached_request.content.package_finalize(self, amt, self.destination_script.clone(), &logger) {
-				return Some((None, self.local_commitment.as_ref().unwrap().feerate_per_kw, transaction));
-			}
+			let transaction = cached_request.content.package_finalize(self, output_value, self.destination_script.clone(), &logger).unwrap();
+			log_trace!(logger, "...with timer {} and feerate {}", new_timer.unwrap(), new_feerate);
+			assert!(predicted_weight >= transaction.get_weight());
+			return Some((new_timer, new_feerate, transaction))
 		}
 		None
 	}
