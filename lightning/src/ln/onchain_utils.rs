@@ -471,7 +471,7 @@ impl PackageTemplate {
 		};
 		bumped_tx.get_weight() + witnesses_weight
 	}
-	pub(crate) fn package_finalize<L: Deref, ChanSigner: ChannelKeys>(&self, onchain_handler: &mut OnchainTxHandler<ChanSigner>, value: u64, destination_script: Script, logger: &L) -> Option<Transaction>
+	pub(crate) fn package_finalize<L: Deref, ChanSigner: ChannelKeys>(&self, onchain_handler: &mut OnchainTxHandler<ChanSigner>, value: u64, destination_script: Script, logger: &L) -> Option<Vec<Transaction>>
 		where L::Target: Logger,
 	{
 		let mut bumped_tx = Transaction {
@@ -516,7 +516,7 @@ impl PackageTemplate {
 					}
 				}
 				log_trace!(logger, "Going to broadcast Penalty Transaction {}...", bumped_tx.txid());
-				return Some(bumped_tx);
+				return Some(vec![bumped_tx]);
 			},
 			PackageTemplate::RemoteHTLCTx { ref inputs } => {
 				for outp in inputs.keys() {
@@ -547,22 +547,71 @@ impl PackageTemplate {
 					}
 				}
 				log_trace!(logger, "Going to broadcast Claim Transaction {} claiming remote htlc output...", bumped_tx.txid());
-				return Some(bumped_tx);
+				return Some(vec![bumped_tx]);
 			},
 			PackageTemplate::LocalHTLCTx { ref input } => {
 				let htlc_tx = onchain_handler.get_fully_signed_htlc_tx(&input.0, &input.1.preimage);
 				if let Some(htlc_tx) = htlc_tx {
 					// Timer set to $NEVER given we can't bump tx without anchor outputs
 					log_trace!(logger, "Going to broadcast Local HTLC-{} claiming HTLC output {} from {}...", if input.1.preimage.is_some() { "Success" } else { "Timeout" }, input.0.vout, input.0.txid);
-					return Some(htlc_tx);
+					return Some(vec![htlc_tx]);
 				}
 				return None;
 			},
-			PackageTemplate::LocalCommitmentTx { ref input, .. } => {
+			PackageTemplate::LocalCommitmentTx { ref input, ref utxo_input } => {
+
+				// We sign our commitment transaction
 				let signed_tx = onchain_handler.get_fully_signed_local_tx(&input.1.funding_redeemscript).unwrap();
+				let mut cpfp_tx = Transaction {
+					version: 2,
+					lock_time: 0,
+					input: Vec::with_capacity(2);
+					output: vec![TxOut {
+						script_pubkey: destination_script.clone(),
+						value,
+					}],
+				};
+				if let Some(ref unsigned_tx) = onchain_handler.local_commitment.as_ref() {
+					// We find & select our anchor output
+					let our_anchor_output_script = get_anchor_redeemscript(&onchain_handler.key_storage.pubkeys().funding_pubkey);
+					let mut vout = ::std::u32::MAX;
+					for (idx, outp) in unsigned_tx.output.iter().enumerate() {
+						if outp.script_pubkey == our_anchor_output_script.to_v0_p2wsh() {
+							vout = idx;
+						}
+					}
+					if vout == ::std::u32::MAX { return None; }
+					let anchor_outpoint = BitcoinOutPoint {
+						txid: unsigned_tx.txid(),
+						vout,
+					};
+					// We take our bumping outpoint
+					let bumping_outpoint = utxo_input.unwrap().0;
+					// We build our CPFP transaction
+					cpfp_tx.input.push(TxIn {
+						previous_output: *anchor_outpoint,
+						script_sig: Script::new(),
+						sequence: 0xfffffffd,
+						witness: Vec::new(),
+					});
+					cpfp_tx.input.push(TxIn {
+						previous_output: *bumping_outpoint,
+						script_sig: Script::new(),
+						sequence: 0xfffffffd,
+						witness: Vec::new(),
+					});
+					// We sign and witness finalize anchor input
+					if let Some(anchor_sig) = onchain_handler.key_storage.sign_anchor_spend(our_anchor_script) {
+						//XXX: code key interface for anchor spend
+					}
+					// We sign and witness finalize bumping input
+					if let Some(bumping_sig) = utxo_pool.sign_utxo(our_anchor_script) {
+						//XXX: code utxo interface for testing
+					}
+				}
 				// Timer set to $NEVER given we can't bump tx without anchor outputs
 				log_trace!(logger, "Going to broadcast Local Transaction {} claiming funding output {} from {}...", signed_tx.txid(), input.0.vout, input.0.txid);
-				return Some(signed_tx);
+				return Some(vec![signed_tx, cpfp_tx]);
 			}
 		}
 	}

@@ -311,11 +311,10 @@ impl<ChanSigner: ChannelKeys> OnchainTxHandler<ChanSigner> {
 		let mut amt = cached_request.content.package_amounts();
 		let local_commitment = self.local_commitment.as_ref().unwrap();
 		let predicted_weight = cached_request.content.package_weight(&self.destination_script, &local_commitment.unsigned_tx);
-		//XXX: predicted weight must include bump utxo spend and input
 		if let Some((output_value, new_feerate)) = onchain_utils::compute_output_value(predicted_weight, amt, cached_request.feerate_previous, &fee_estimator, &logger) {
 			assert!(new_feerate != 0);
 
-			let transaction = cached_request.content.package_finalize(self, output_value, self.destination_script.clone(), &logger).unwrap();
+			let transaction = cached_request.content.package_finalize(self, output_value, self.destination_script.clone(), &logger, &utxo_pool).unwrap();
 			log_trace!(logger, "...with timer {} and feerate {}", new_timer.unwrap(), new_feerate);
 			assert!(predicted_weight >= transaction.get_weight());
 			return Some((new_timer, new_feerate, transaction))

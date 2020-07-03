@@ -8026,3 +8026,11 @@ fn test_update_err_monitor_lockdown() {
 	let events = nodes[0].node.get_and_clear_pending_events();
 	assert_eq!(events.len(), 1);
 }
+
+#[test]
+fn test_basic_commitment_cpfp() {
+	// Node A sends a HTLC to Node B, who holds it. We propagate blocks until HTLC
+	// reach its deadine and Node A must close the channnel. We observe a broadcast
+	// of a commitment transaction and its anchor-output CPFP. After few blocks we
+	// observe a feerate-bump of the CPFP.
+}
