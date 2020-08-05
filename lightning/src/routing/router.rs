@@ -24,6 +24,7 @@ use util::logger::Logger;
 use std::cmp;
 use std::collections::{HashMap,BinaryHeap};
 use std::ops::Deref;
+use std::hash::{Hash, Hasher};
 
 /// A hop in a route
 #[derive(Clone, PartialEq)]
@@ -44,6 +45,15 @@ pub struct RouteHop {
 	/// expected at the destination, in excess of the current block height.
 	pub cltv_expiry_delta: u32,
 }
+
+impl Eq for RouteHop {}
+impl Hash for RouteHop {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.short_channel_id.hash(state);
+        self.fee_msat.hash(state);
+    }
+}
+
 
 impl Writeable for Vec<RouteHop> {
 	fn write<W: ::util::ser::Writer>(&self, writer: &mut W) -> Result<(), ::std::io::Error> {
