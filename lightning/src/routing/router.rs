@@ -22,7 +22,7 @@ use util::ser::{Writeable, Readable};
 use util::logger::Logger;
 
 use std::cmp;
-use std::collections::{HashMap,BinaryHeap};
+use std::collections::{HashMap, BinaryHeap, HashSet};
 use std::ops::Deref;
 use std::hash::{Hash, Hasher};
 
@@ -138,7 +138,7 @@ pub struct RouteHint {
 	pub htlc_maximum_msat: Option<u64>,
 }
 
-#[derive(Eq, PartialEq)]
+#[derive(Eq, PartialEq, Clone)]
 struct RouteGraphNode {
 	pubkey: PublicKey,
 	lowest_fee_to_peer_through_node: u64,
@@ -165,11 +165,26 @@ struct DummyDirectionalChannelInfo {
 	fees: RoutingFees,
 }
 
+#[derive(Clone)]
 struct RouteHopInGraph {
 	route_hop: RouteHop,
-	total_fee: u64,
 	available_msat: Option<u64>,
-	node_lowest_inbound_fees: RoutingFees,
+	/// Minimal fees required to route to the source node of this hop (one hop "before" using this hop).
+	/// Useful to compute the cost of reaching the source of this hop, which can be later used to choose
+	/// the cheapest, while we traverse backwards.
+	src_lowest_inbound_fees: RoutingFees,
+	/// Fees of the channel used in this hop.
+	channel_fees: RoutingFees,
+	/// Consists of the fee of this channel (see channel_fees), the fee paid to reach this hop (see src_lowest_inbound_fees)
+	/// and all the fees paid *after* this channel on the way to the destination (because we traverse backwards).
+	total_fee: u64,
+}
+
+struct PaymentPathInGraph {
+	path: Vec<RouteHop>,
+	bottleneck_msat: Option<u64>,
+	total_proportional_fee_millionths: u32,
+	fee_msat: u64,
 }
 
 /// Gets a route from us to the given target node.
@@ -200,7 +215,20 @@ pub fn get_route<L: Deref>(our_node_id: &PublicKey, network: &NetworkGraph, targ
 		return Err(LightningError{err: "Cannot generate a route of more value than all existing satoshis".to_owned(), action: ErrorAction::IgnoreError});
 	}
 
-	// We do a dest-to-source Dijkstra's sorting by each node's distance from the destination
+	// The general route finding idea is the following:
+	// 1. Fill first/last hops communicated by the caller.
+	// 2. Construct and store a path.
+	//	Remember which channels were used so that future paths don't rely on the same capacity.
+	//	Remember the used channel with minimum capacity ("bottleneck"), so that future paths avoid using it.
+	// 3. If we hit the recommended target amount or made too many attempts of path finding, proceeed to the next step. Otherwise, repeat step 2.
+	// 4. At this point, the found paths may be using higher amount than we need to send.
+	// 5. Of all the found paths, select only those with the lowest total fee.
+	// 6. Randomly combine paths into routes having enough to fulfill the payment.
+	// 7. The last path in every selected route is likely to be more than we need (see step 6). Reduce its amount and recompute fees.
+	// 8. Choose the best route by the lowest total fee.
+
+	// As for the actual search algorithm,
+	// we do a dest-to-source Dijkstra's sorting by each node's distance from the destination
 	// plus the minimum per-HTLC fee to get from it to another node (aka "shitty A*").
 	// TODO: There are a few tweaks we could do, including possibly pre-calculating more stuff
 	// to use as the A* heuristic beyond just the cost to get one node further than the current
@@ -218,7 +246,10 @@ pub fn get_route<L: Deref>(our_node_id: &PublicKey, network: &NetworkGraph, targ
 
 	let mut targets = BinaryHeap::new(); //TODO: Do we care about switching to eg Fibbonaci heap?
 	let mut dist = HashMap::with_capacity(network.get_nodes().len());
+	let recommended_available_msat = final_value_msat * 4;
 
+	// Prepare the data we'll use for dest-to-source search by inserting first hops suggested by the caller as targets.
+	// Our search will then attempt to reach them while traversing from the dest node.
 	let mut first_hop_targets = HashMap::with_capacity(if first_hops.is_some() { first_hops.as_ref().unwrap().len() } else { 0 });
 	if let Some(hops) = first_hops {
 		for chan in hops {
@@ -242,6 +273,11 @@ pub fn get_route<L: Deref>(our_node_id: &PublicKey, network: &NetworkGraph, targ
 		}
 	}
 
+	// We don't want multiple paths (as per MPP) share capacity of the same channels.
+	// This map allows paths to be aware of the channel use by other paths in the same call.
+	// This would help to make a better path finding decisions and not "overbook" channels.
+	let mut used_channels_with_amounts_msat = HashMap::new();
+
 	macro_rules! add_entry {
 		// Adds entry which goes from $src_node_id to $dest_node_id
 		// over the channel with id $chan_id with fees described in
@@ -255,6 +291,7 @@ pub fn get_route<L: Deref>(our_node_id: &PublicKey, network: &NetworkGraph, targ
 				{
 					let mut total_fee = $starting_fee_msat as u64;
 
+
 					let mut available_msat = $capacity_sats;
 					if let Some(htlc_maximum_msat) = $directional_info.htlc_maximum_msat {
 						if let Some(capacity_sats) = $capacity_sats {
@@ -263,9 +300,19 @@ pub fn get_route<L: Deref>(our_node_id: &PublicKey, network: &NetworkGraph, targ
 							available_msat = Some(htlc_maximum_msat);
 						}
 					}
+					if let Some(max_available_capacity_msat) = available_msat {
+					   if let Some(used_amount_msat) = used_channels_with_amounts_msat.get(&$chan_id.clone()) {
+							// Take into account amounts used in previous paths within the current call (as per MPP),
+							// so that multiple paths don't rely on the same capacity.
+							available_msat = Some(max_available_capacity_msat - used_amount_msat)
+						}
+					}
 
 					let hm_entry = dist.entry(&$src_node_id);
 					let old_entry = hm_entry.or_insert_with(|| {
+						// If there was previously no known way to access the source node (recall it goes dest-to-source) of $chan_id,
+						// first add a semi-dummy record just to compute the fees to reach the source node.
+						// This will affect our decision on selecting $chan_id as a way to reach the $dest_node_id.
 						let node = network.get_nodes().get(&$src_node_id).unwrap();
 						let mut fee_base_msat = u32::max_value();
 						let mut fee_proportional_millionths = u32::max_value();
@@ -282,20 +329,21 @@ pub fn get_route<L: Deref>(our_node_id: &PublicKey, network: &NetworkGraph, targ
 								fee_msat: 0,
 								cltv_expiry_delta: 0,
 							},
-							total_fee: u64::max_value(),
-							node_lowest_inbound_fees: RoutingFees {
+							available_msat: None,
+							src_lowest_inbound_fees: RoutingFees {
 								base_msat: fee_base_msat,
 								proportional_millionths: fee_proportional_millionths,
 							},
-							available_msat: None,
+							channel_fees: $directional_info.fees,
+							total_fee: u64::max_value(),
 						}
 					});
 					if $src_node_id != *our_node_id {
 						// Ignore new_fee for channel-from-us as we assume all channels-from-us
 						// will have the same effective-fee
 						total_fee += new_fee;
-						if let Some(fee_inc) = final_value_msat.checked_add(total_fee).and_then(|inc| { (old_entry.node_lowest_inbound_fees.proportional_millionths as u64).checked_mul(inc) }) {
-							total_fee += fee_inc / 1000000 + (old_entry.node_lowest_inbound_fees.base_msat as u64);
+						if let Some(fee_inc) = final_value_msat.checked_add(total_fee).and_then(|inc| { (old_entry.src_lowest_inbound_fees.proportional_millionths as u64).checked_mul(inc) }) {
+							total_fee += fee_inc / 1000000 + (old_entry.src_lowest_inbound_fees.base_msat as u64);
 						} else {
 							// max_value means we'll always fail the old_entry.0 > total_fee check
 							total_fee = u64::max_value();
@@ -306,6 +354,9 @@ pub fn get_route<L: Deref>(our_node_id: &PublicKey, network: &NetworkGraph, targ
 						lowest_fee_to_peer_through_node: total_fee,
 						lowest_fee_to_node: $starting_fee_msat as u64 + new_fee,
 					};
+					// Update the way of reaching $dest_node_id with the given $chan_id, if this way is cheaper
+					// then the already known (considering the cost to "reach" this channel from the end mode of the search,
+					// the cost of using this channel, and the cost of routing to the source node of this channel).
 					if old_entry.total_fee > total_fee {
 						targets.push(new_graph_node);
 						old_entry.total_fee = total_fee;
@@ -318,11 +369,17 @@ pub fn get_route<L: Deref>(our_node_id: &PublicKey, network: &NetworkGraph, targ
 							cltv_expiry_delta: $directional_info.cltv_expiry_delta as u32,
 						};
 						old_entry.available_msat = available_msat;
+						old_entry.channel_fees = $directional_info.fees;
 					}
 				}
 			}
 		};
 	}
+
+	// For every new iteration of path finding, we will avoid using those channels,
+	// which had the lowest available amount in the previous iterations.
+	// It would help to have a strong diverse set of paths.
+	let mut channels_to_avoid = HashSet::new();
 
 	macro_rules! add_entries_to_cheapest_to_target_node {
 		( $node: expr, $node_id: expr, $fee_to_target_msat: expr ) => {
@@ -341,6 +398,9 @@ pub fn get_route<L: Deref>(our_node_id: &PublicKey, network: &NetworkGraph, targ
 
 			if !features.requires_unknown_bits() {
 				for chan_id in $node.channels.iter() {
+					if channels_to_avoid.contains(chan_id) {
+						continue;
+					}
 					let chan = network.get_channels().get(chan_id).unwrap();
 					if !chan.features.requires_unknown_bits() {
 						if chan.node_one == *$node_id {
@@ -368,6 +428,7 @@ pub fn get_route<L: Deref>(our_node_id: &PublicKey, network: &NetworkGraph, targ
 		};
 	}
 
+	// Add the payment receiver node as a target, so that the dest-to-source search algorithm knows what to start with.
 	match network.get_nodes().get(target) {
 		None => {},
 		Some(node) => {
@@ -394,53 +455,175 @@ pub fn get_route<L: Deref>(our_node_id: &PublicKey, network: &NetworkGraph, targ
 		}
 	}
 
-	while let Some(RouteGraphNode { pubkey, lowest_fee_to_node, .. }) = targets.pop() {
-		if pubkey == *our_node_id {
-			let mut res = vec!(dist.remove(&our_node_id).unwrap().route_hop);
-			loop {
-				if let Some(&(_, ref features)) = first_hop_targets.get(&res.last().unwrap().pubkey) {
-					res.last_mut().unwrap().node_features = features.to_context();
-				} else if let Some(node) = network.get_nodes().get(&res.last().unwrap().pubkey) {
-					if let Some(node_info) = node.announcement_info.as_ref() {
-						res.last_mut().unwrap().node_features = node_info.features.clone();
+	let mut payment_paths = Vec::new();
+	let mut tries_left = 10;
+	let mut found_amount_msat = 0;
+	// For every MPP start with the same pre-filled data.
+	let prefilled_targets = targets.clone();
+	let prefilled_dist = dist.clone();
+
+	// TODO: currently pretending that always have blockchain/amount data for channel capacities.
+	// Should handle None better.
+	'paths_collection: loop {
+		// For every new path, start from the same prefilled data, except channels_to_avoid and used_channels_with_amounts_msat,
+		// which will improve the further iterations of path finding.
+		targets = prefilled_targets.clone();
+		dist = prefilled_dist.clone();
+
+		// At this point, targets are filled with the data from first and last hops communicated by the caller, and the payment receiver.
+		'path_construction: while let Some(RouteGraphNode { pubkey, lowest_fee_to_node, .. }) = targets.pop() {
+
+			// Since we're going dest-to-source, hitting our node as a target means that we should stop traversing the
+			// graph and arrange the path out of what we found.
+			if pubkey == *our_node_id {
+				let mut new_entry = dist.remove(&our_node_id).unwrap();
+				let mut res = vec!(new_entry.route_hop.clone());
+				let mut path_bottleneck_msat = None;
+				let mut cur_path_fees = Vec::new();
+				let mut smallest_channel_id = None;
+
+				loop {
+					if let Some(&(_, ref features)) = first_hop_targets.get(&res.last().unwrap().pubkey) {
+						res.last_mut().unwrap().node_features = features.to_context();
+					} else if let Some(node) = network.get_nodes().get(&res.last().unwrap().pubkey) {
+						if let Some(node_info) = node.announcement_info.as_ref() {
+							res.last_mut().unwrap().node_features = node_info.features.clone();
+						} else {
+							res.last_mut().unwrap().node_features = NodeFeatures::empty();
+						}
 					} else {
-						res.last_mut().unwrap().node_features = NodeFeatures::empty();
+						// We should be able to fill in features for everything except the last
+						// hop, if the last hop was provided via a BOLT 11 invoice (though we
+						// should be able to extend it further as BOLT 11 does have feature
+						// flags for the last hop node itself).
+						assert!(res.last().unwrap().pubkey == *target);
 					}
-				} else {
-					// We should be able to fill in features for everything except the last
-					// hop, if the last hop was provided via a BOLT 11 invoice (though we
-					// should be able to extend it further as BOLT 11 does have feature
-					// flags for the last hop node itself).
-					assert!(res.last().unwrap().pubkey == *target);
+
+					// For this path, select the channel with the lowest available amount to avoid hitting it
+					// in the next path finding iterations.
+					if let Some(current_hop_bottleneck_msat) = new_entry.available_msat {
+						if let Some(full_path_bottleneck_msat) = path_bottleneck_msat {
+							if current_hop_bottleneck_msat < full_path_bottleneck_msat {
+								path_bottleneck_msat = Some(current_hop_bottleneck_msat);
+								smallest_channel_id = Some(res.last().unwrap().short_channel_id);
+							}
+						}
+					}
+
+					if res.last().unwrap().pubkey == *target {
+						break;
+					}
+
+					new_entry = match dist.remove(&res.last().unwrap().pubkey) {
+						Some(hop) => hop,
+						None => return Err(LightningError{err: "Failed to find a non-fee-overflowing path to the given destination".to_owned(), action: ErrorAction::IgnoreError}),
+					};
+					res.last_mut().unwrap().fee_msat = new_entry.route_hop.fee_msat;
+					res.last_mut().unwrap().cltv_expiry_delta = new_entry.route_hop.cltv_expiry_delta;
+					res.push(new_entry.route_hop);
+					cur_path_fees.push(new_entry.channel_fees);
 				}
-				if res.last().unwrap().pubkey == *target {
-					break;
+				res.last_mut().unwrap().fee_msat = final_value_msat;
+				res.last_mut().unwrap().cltv_expiry_delta = final_cltv;
+
+				// Since the paths allows to transfer as much sats as the lowest channel it has ("bottleneck"),
+				// we should recompute the fees so that we don't overpay with the other (larger) used channels.
+				let mut recomputed_fee_msat = 0;
+				let mut total_proportional_fee_millionths = 0;
+				let mut i = 0;
+				for fees in cur_path_fees.clone() {
+					let current_hop_amount_msat = path_bottleneck_msat.unwrap().checked_add(recomputed_fee_msat);
+					let proportional_fee_millions = current_hop_amount_msat.unwrap().checked_mul(fees.proportional_millionths as u64);
+					let mut hop_to_update = res.get_mut(i).unwrap();
+					if let Some(new_fee) = proportional_fee_millions.and_then(|part| {
+							(fees.base_msat as u64).checked_add(part / 1000000) }) {
+
+						recomputed_fee_msat += new_fee;
+						total_proportional_fee_millionths += fees.proportional_millionths;
+						hop_to_update.fee_msat = new_fee;
+					}
+
+					*used_channels_with_amounts_msat.entry(hop_to_update.short_channel_id).or_insert(0) += path_bottleneck_msat.unwrap();
+					i += 1;
 				}
 
-				let new_entry = match dist.remove(&res.last().unwrap().pubkey) {
-					Some(hop) => hop.route_hop,
-					None => return Err(LightningError{err: "Failed to find a non-fee-overflowing path to the given destination".to_owned(), action: ErrorAction::IgnoreError}),
-				};
-				res.last_mut().unwrap().fee_msat = new_entry.fee_msat;
-				res.last_mut().unwrap().cltv_expiry_delta = new_entry.cltv_expiry_delta;
-				res.push(new_entry);
+				payment_paths.push(PaymentPathInGraph {
+					path: res,
+					bottleneck_msat: path_bottleneck_msat,
+					total_proportional_fee_millionths,
+					fee_msat: recomputed_fee_msat
+				});
+
+				// Track the total amount all our collected paths allow to send so that we know when to stop looking for more paths.
+				if let Some(bottleneck_amount_msat) = path_bottleneck_msat {
+					found_amount_msat += bottleneck_amount_msat;
+				}
+
+				if let Some(chan_id_to_avoid) = smallest_channel_id {
+					channels_to_avoid.insert(chan_id_to_avoid);
+				}
+				break 'path_construction;
 			}
-			res.last_mut().unwrap().fee_msat = final_value_msat;
-			res.last_mut().unwrap().cltv_expiry_delta = final_cltv;
-			let route = Route { paths: vec![res] };
-			log_trace!(logger, "Got route: {}", log_route!(route));
-			return Ok(route);
-		}
 
-		match network.get_nodes().get(&pubkey) {
-			None => {},
-			Some(node) => {
-				add_entries_to_cheapest_to_target_node!(node, &pubkey, lowest_fee_to_node);
-			},
+			// Otherwise, since the current target node is not us, keep "unrolling" the payment graph from
+			// dest to source by finding a way to reach the current target from the source side.
+			match network.get_nodes().get(&pubkey) {
+				None => {},
+				Some(node) => {
+					add_entries_to_cheapest_to_target_node!(node, &pubkey, lowest_fee_to_node);
+				},
+			}
+		}
+		tries_left -= 1;
+
+		if tries_left == 0 || found_amount_msat >= recommended_available_msat {
+			break 'paths_collection;
 		}
 	}
 
-	Err(LightningError{err: "Failed to find a path to the given destination".to_owned(), action: ErrorAction::IgnoreError})
+	if payment_paths.len() == 0 {
+		return Err(LightningError{err: "Failed to find a path to the given destination".to_owned(), action: ErrorAction::IgnoreError});
+	}
+
+	// Sort by total fees and take the best paths.
+	payment_paths.sort_by_key(|k| k.fee_msat);
+	if payment_paths.len() > 50 {
+		payment_paths.truncate(50);
+	}
+
+	// Draw multiple sufficient routes by randomly combining the selected paths.
+	let mut drawn_routes_with_fees = Vec::new();
+	for i in 0..10 {
+		let mut cur_route_with_fees = Vec::new();
+		let mut aggregate_amount_msat = 0;
+		let cur_payment_paths = &payment_paths[i..i+10]; // TODO: real random sampling
+		let mut aggregate_fee_msat = 0;
+
+		for path_in_graph in cur_payment_paths {
+			cur_route_with_fees.push(path_in_graph);
+			aggregate_amount_msat += path_in_graph.bottleneck_msat.unwrap();
+			aggregate_fee_msat += path_in_graph.fee_msat;
+			if aggregate_amount_msat > final_value_msat {
+				break;
+			}
+		}
+		drawn_routes_with_fees.push((cur_route_with_fees, aggregate_fee_msat))
+	}
+
+
+	// TODO reduce amount in the last path (sorted by proportional fee) to not overshoot and adjust fees.
+
+	// Select the best route by total fee.
+	drawn_routes_with_fees.sort_by_key(|k| k.1);
+	let mut selected_paths = Vec::<Vec::<RouteHop>>::new();
+	for path_in_graph in &drawn_routes_with_fees.first().unwrap().0 {
+		selected_paths.push(path_in_graph.path.to_vec());
+	}
+
+	// TODO add amount per path so that the caller knows how to distribute the amount being sent among MPPs.
+	let route = Route { paths: selected_paths };
+	log_trace!(logger, "Got route: {}", log_route!(route));
+	return Ok(route);
 }
 
 #[cfg(test)]
