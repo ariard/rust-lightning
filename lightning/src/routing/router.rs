@@ -165,6 +165,12 @@ struct DummyDirectionalChannelInfo {
 	fees: RoutingFees,
 }
 
+struct RouteHopInGraph {
+	route_hop: RouteHop,
+	total_fee: u64,
+	available_msat: Option<u64>,
+	node_lowest_inbound_fees: RoutingFees,
+}
 
 /// Gets a route from us to the given target node.
 ///
@@ -267,10 +273,8 @@ pub fn get_route<L: Deref>(our_node_id: &PublicKey, network: &NetworkGraph, targ
 							fee_base_msat = fees.base_msat;
 							fee_proportional_millionths = fees.proportional_millionths;
 						};
-						(u64::max_value(),
-							fee_base_msat,
-							fee_proportional_millionths,
-							RouteHop {
+						RouteHopInGraph {
+							route_hop: RouteHop {
 								pubkey: $dest_node_id.clone(),
 								node_features: NodeFeatures::empty(),
 								short_channel_id: 0,
@@ -278,15 +282,20 @@ pub fn get_route<L: Deref>(our_node_id: &PublicKey, network: &NetworkGraph, targ
 								fee_msat: 0,
 								cltv_expiry_delta: 0,
 							},
-							None,
-						)
+							total_fee: u64::max_value(),
+							node_lowest_inbound_fees: RoutingFees {
+								base_msat: fee_base_msat,
+								proportional_millionths: fee_proportional_millionths,
+							},
+							available_msat: None,
+						}
 					});
 					if $src_node_id != *our_node_id {
 						// Ignore new_fee for channel-from-us as we assume all channels-from-us
 						// will have the same effective-fee
 						total_fee += new_fee;
-						if let Some(fee_inc) = final_value_msat.checked_add(total_fee).and_then(|inc| { (old_entry.2 as u64).checked_mul(inc) }) {
-							total_fee += fee_inc / 1000000 + (old_entry.1 as u64);
+						if let Some(fee_inc) = final_value_msat.checked_add(total_fee).and_then(|inc| { (old_entry.node_lowest_inbound_fees.proportional_millionths as u64).checked_mul(inc) }) {
+							total_fee += fee_inc / 1000000 + (old_entry.node_lowest_inbound_fees.base_msat as u64);
 						} else {
 							// max_value means we'll always fail the old_entry.0 > total_fee check
 							total_fee = u64::max_value();
@@ -297,10 +306,10 @@ pub fn get_route<L: Deref>(our_node_id: &PublicKey, network: &NetworkGraph, targ
 						lowest_fee_to_peer_through_node: total_fee,
 						lowest_fee_to_node: $starting_fee_msat as u64 + new_fee,
 					};
-					if old_entry.0 > total_fee {
+					if old_entry.total_fee > total_fee {
 						targets.push(new_graph_node);
-						old_entry.0 = total_fee;
-						old_entry.3 = RouteHop {
+						old_entry.total_fee = total_fee;
+						old_entry.route_hop = RouteHop {
 							pubkey: $dest_node_id.clone(),
 							node_features: NodeFeatures::empty(),
 							short_channel_id: $chan_id.clone(),
@@ -308,7 +317,7 @@ pub fn get_route<L: Deref>(our_node_id: &PublicKey, network: &NetworkGraph, targ
 							fee_msat: new_fee, // This field is ignored on the last-hop anyway
 							cltv_expiry_delta: $directional_info.cltv_expiry_delta as u32,
 						};
-						old_entry.4 = available_msat;
+						old_entry.available_msat = available_msat;
 					}
 				}
 			}
@@ -387,7 +396,7 @@ pub fn get_route<L: Deref>(our_node_id: &PublicKey, network: &NetworkGraph, targ
 
 	while let Some(RouteGraphNode { pubkey, lowest_fee_to_node, .. }) = targets.pop() {
 		if pubkey == *our_node_id {
-			let mut res = vec!(dist.remove(&our_node_id).unwrap().3);
+			let mut res = vec!(dist.remove(&our_node_id).unwrap().route_hop);
 			loop {
 				if let Some(&(_, ref features)) = first_hop_targets.get(&res.last().unwrap().pubkey) {
 					res.last_mut().unwrap().node_features = features.to_context();
@@ -409,7 +418,7 @@ pub fn get_route<L: Deref>(our_node_id: &PublicKey, network: &NetworkGraph, targ
 				}
 
 				let new_entry = match dist.remove(&res.last().unwrap().pubkey) {
-					Some(hop) => hop.3,
+					Some(hop) => hop.route_hop,
 					None => return Err(LightningError{err: "Failed to find a non-fee-overflowing path to the given destination".to_owned(), action: ErrorAction::IgnoreError}),
 				};
 				res.last_mut().unwrap().fee_msat = new_entry.fee_msat;
