@@ -273,6 +273,11 @@ pub fn get_route<L: Deref>(our_node_id: &PublicKey, network: &NetworkGraph, targ
 		}
 	}
 
+	// For every new iteration of path finding, we will avoid using those channels,
+	// which had the lowest available amount in the previous iterations.
+	// It would help to have a strong diverse set of paths.
+	let mut channels_to_avoid = HashSet::new();
+
 	// We don't want multiple paths (as per MPP) share capacity of the same channels.
 	// This map allows paths to be aware of the channel use by other paths in the same call.
 	// This would help to make a better path finding decisions and not "overbook" channels.
@@ -283,8 +288,9 @@ pub fn get_route<L: Deref>(our_node_id: &PublicKey, network: &NetworkGraph, targ
 		// over the channel with id $chan_id with fees described in
 		// $directional_info.
 		( $chan_id: expr, $src_node_id: expr, $dest_node_id: expr, $directional_info: expr, $capacity_sats: expr, $chan_features: expr, $starting_fee_msat: expr ) => {
+
 			//TODO: Explore simply adding fee to hit htlc_minimum_msat
-			if $starting_fee_msat as u64 + final_value_msat >= $directional_info.htlc_minimum_msat {
+			if $starting_fee_msat as u64 + final_value_msat >= $directional_info.htlc_minimum_msat && !channels_to_avoid.contains(&$chan_id.clone()) {
 				let proportional_fee_millions = ($starting_fee_msat + final_value_msat).checked_mul($directional_info.fees.proportional_millionths as u64);
 				if let Some(new_fee) = proportional_fee_millions.and_then(|part| {
 						($directional_info.fees.base_msat as u64).checked_add(part / 1000000) })
@@ -376,11 +382,6 @@ pub fn get_route<L: Deref>(our_node_id: &PublicKey, network: &NetworkGraph, targ
 		};
 	}
 
-	// For every new iteration of path finding, we will avoid using those channels,
-	// which had the lowest available amount in the previous iterations.
-	// It would help to have a strong diverse set of paths.
-	let mut channels_to_avoid = HashSet::new();
-
 	macro_rules! add_entries_to_cheapest_to_target_node {
 		( $node: expr, $node_id: expr, $fee_to_target_msat: expr ) => {
 			if first_hops.is_some() {
@@ -428,47 +429,44 @@ pub fn get_route<L: Deref>(our_node_id: &PublicKey, network: &NetworkGraph, targ
 		};
 	}
 
-	// Add the payment receiver node as a target, so that the dest-to-source search algorithm knows what to start with.
-	match network.get_nodes().get(target) {
-		None => {},
-		Some(node) => {
-			add_entries_to_cheapest_to_target_node!(node, target, 0);
-		},
-	}
-
-	for hop in last_hops.iter() {
-		if first_hops.is_none() || hop.src_node_id != *our_node_id { // first_hop overrules last_hops
-			if network.get_nodes().get(&hop.src_node_id).is_some() {
-				if first_hops.is_some() {
-					if let Some(&(ref first_hop, ref features)) = first_hop_targets.get(&hop.src_node_id) {
-						// Currently there are no channel-context features defined, so we are a
-						// bit lazy here. In the future, we should pull them out via our
-						// ChannelManager, but there's no reason to waste the space until we
-						// need them.
-						add_entry!(first_hop, *our_node_id , hop.src_node_id, dummy_directional_info, None::<u64>, features.to_context(), 0);
-					}
-				}
-				// BOLT 11 doesn't allow inclusion of features for the last hop hints, which
-				// really sucks, cause we're gonna need that eventually.
-				add_entry!(hop.short_channel_id, hop.src_node_id, target, hop, None::<u64>, ChannelFeatures::empty(), 0);
-			}
-		}
-	}
-
 	let mut payment_paths = Vec::new();
 	let mut tries_left = 10;
 	let mut found_amount_msat = 0;
-	// For every MPP start with the same pre-filled data.
-	let prefilled_targets = targets.clone();
-	let prefilled_dist = dist.clone();
 
 	// TODO: currently pretending that always have blockchain/amount data for channel capacities.
 	// Should handle None better.
 	'paths_collection: loop {
-		// For every new path, start from the same prefilled data, except channels_to_avoid and used_channels_with_amounts_msat,
-		// which will improve the further iterations of path finding.
-		targets = prefilled_targets.clone();
-		dist = prefilled_dist.clone();
+		// For every new path, start from scratch, except channels_to_avoid and used_channels_with_amounts_msat,
+		// which will improve the further iterations of path finding. Also keep first_hop_targets.
+		targets.clear();
+		dist.clear();
+
+		// Add the payment receiver node as a target, so that the dest-to-source search algorithm knows what to start with.
+		match network.get_nodes().get(target) {
+			None => {},
+			Some(node) => {
+				add_entries_to_cheapest_to_target_node!(node, target, 0);
+			},
+		}
+
+		for hop in last_hops.iter() {
+			if first_hops.is_none() || hop.src_node_id != *our_node_id { // first_hop overrules last_hops
+				if network.get_nodes().get(&hop.src_node_id).is_some() {
+					if first_hops.is_some() {
+						if let Some(&(ref first_hop, ref features)) = first_hop_targets.get(&hop.src_node_id) {
+							// Currently there are no channel-context features defined, so we are a
+							// bit lazy here. In the future, we should pull them out via our
+							// ChannelManager, but there's no reason to waste the space until we
+							// need them.
+							add_entry!(first_hop, *our_node_id , hop.src_node_id, dummy_directional_info, None::<u64>, features.to_context(), 0);
+						}
+					}
+					// BOLT 11 doesn't allow inclusion of features for the last hop hints, which
+					// really sucks, cause we're gonna need that eventually.
+					add_entry!(hop.short_channel_id, hop.src_node_id, target, hop, None::<u64>, ChannelFeatures::empty(), 0);
+				}
+			}
+		}
 
 		// At this point, targets are filled with the data from first and last hops communicated by the caller, and the payment receiver.
 		'path_construction: while let Some(RouteGraphNode { pubkey, lowest_fee_to_node, .. }) = targets.pop() {
