@@ -5006,19 +5006,21 @@ fn test_static_spendable_outputs_justice_tx_revoked_htlc_timeout_tx() {
 	check_spends!(revoked_htlc_txn[1], chan_1.3);
 
 	// B will generate justice tx from A's revoked commitment/HTLC tx
-	connect_block(&nodes[1], &Block { header, txdata: vec![revoked_local_txn[0].clone(), revoked_htlc_txn[0].clone()] }, 0);
+	connect_block(&nodes[1], &Block { header, txdata: vec![revoked_local_txn[0].clone()] }, 0);
+	connect_block(&nodes[1], &Block { header, txdata: vec![revoked_htlc_txn[0].clone()] }, 0);
 	check_closed_broadcast!(nodes[1], false);
 	check_added_monitors!(nodes[1], 1);
 
 	let node_txn = nodes[1].tx_broadcaster.txn_broadcasted.lock().unwrap();
-	assert_eq!(node_txn.len(), 4); // ChannelMonitor: justice tx on revoked commitment, justice tx on revoked HTLC-timeout, adjusted justice tx, ChannelManager: local commitment tx
+	assert_eq!(node_txn.len(), 4); // ChannelMonitor: justice tx on revoked commitment, ChannelManager: local commitment tx, justice tx on revoked HTLC-timeout, adjusted justice tx
 	assert_eq!(node_txn[0].input.len(), 2);
 	check_spends!(node_txn[0], revoked_local_txn[0]);
-	assert_eq!(node_txn[1].input.len(), 1);
-	check_spends!(node_txn[1], revoked_htlc_txn[0]);
+	check_spends!(node_txn[1], chan_1.3);
 	assert_eq!(node_txn[2].input.len(), 1);
-	check_spends!(node_txn[2], revoked_local_txn[0]);
-	check_spends!(node_txn[3], chan_1.3);
+	check_spends!(node_txn[2], revoked_htlc_txn[0]);
+	// New justice tx spending the to_local output of counterparty commitment as its htlc timeout broke our aggregated justice
+	assert_eq!(node_txn[3].input.len(), 1);
+	check_spends!(node_txn[3], revoked_local_txn[0]);
 
 	let header_1 = BlockHeader { version: 0x20000000, prev_blockhash: header.bitcoin_hash(), merkle_root: Default::default(), time: 42, bits: 42, nonce: 42 };
 	connect_block(&nodes[1], &Block { header: header_1, txdata: vec![node_txn[0].clone(), node_txn[2].clone()] }, 1);
@@ -5061,14 +5063,15 @@ fn test_static_spendable_outputs_justice_tx_revoked_htlc_success_tx() {
 	check_spends!(revoked_htlc_txn[0], revoked_local_txn[0]);
 
 	// A will generate justice tx from B's revoked commitment/HTLC tx
-	connect_block(&nodes[0], &Block { header, txdata: vec![revoked_local_txn[0].clone(), revoked_htlc_txn[0].clone()] }, 1);
+	connect_block(&nodes[0], &Block { header, txdata: vec![revoked_local_txn[0].clone()] }, 1);
+	connect_block(&nodes[0], &Block { header, txdata: vec![revoked_htlc_txn[0].clone()] }, 1);
 	check_closed_broadcast!(nodes[0], false);
 	check_added_monitors!(nodes[0], 1);
 
 	let node_txn = nodes[0].tx_broadcaster.txn_broadcasted.lock().unwrap();
-	assert_eq!(node_txn.len(), 3); // ChannelMonitor: justice tx on revoked commitment, justice tx on revoked HTLC-success, ChannelManager: local commitment tx
+	assert_eq!(node_txn.len(), 3); // ChannelMonitor: justice tx on revoked commitment, ChannelManager: local commitment tx, justice tx on revoked HTLC-success
 	assert_eq!(node_txn[1].input.len(), 1);
-	check_spends!(node_txn[1], revoked_htlc_txn[0]);
+	check_spends!(node_txn[2], revoked_htlc_txn[0]);
 
 	let header_1 = BlockHeader { version: 0x20000000, prev_blockhash: header.bitcoin_hash(), merkle_root: Default::default(), time: 42, bits: 42, nonce: 42 };
 	connect_block(&nodes[0], &Block { header: header_1, txdata: vec![node_txn[0].clone(), node_txn[2].clone()] }, 1);
@@ -5076,12 +5079,11 @@ fn test_static_spendable_outputs_justice_tx_revoked_htlc_success_tx() {
 
 	// Check A's ChannelMonitor was able to generate the right spendable output descriptor
 	let spend_txn = check_spendable_outputs!(nodes[0], 1, node_cfgs[0].keys_manager, 100000);
-	assert_eq!(spend_txn.len(), 5); // Duplicated SpendableOutput due to block rescan after revoked htlc output tracking
+	assert_eq!(spend_txn.len(), 4);
 	assert_eq!(spend_txn[0], spend_txn[1]);
-	assert_eq!(spend_txn[0], spend_txn[2]);
 	check_spends!(spend_txn[0], revoked_local_txn[0]); // spending to_remote output from revoked local tx
-	check_spends!(spend_txn[3], node_txn[0]); // spending justice tx output from revoked local tx htlc received output
-	check_spends!(spend_txn[4], node_txn[2]); // spending justice tx output on htlc success tx
+	check_spends!(spend_txn[2], node_txn[0]); // spending justice tx output from revoked local tx htlc received output
+	check_spends!(spend_txn[3], node_txn[2]); // spending justice tx output on htlc success tx
 }
 
 #[test]
@@ -7868,7 +7870,8 @@ fn test_bump_penalty_txn_on_revoked_htlcs() {
 	expect_pending_htlcs_forwardable_ignore!(nodes[0]);
 
 	let header_129 = BlockHeader { version: 0x20000000, prev_blockhash: header_128, merkle_root: Default::default(), time: 42, bits: 42, nonce: 42 };
-	connect_block(&nodes[0], &Block { header: header_129, txdata: vec![revoked_local_txn[0].clone(), revoked_htlc_txn[0].clone(), revoked_htlc_txn[1].clone()] }, 129);
+	connect_block(&nodes[0], &Block { header: header_129, txdata: vec![revoked_local_txn[0].clone()] }, 129);
+	connect_block(&nodes[0], &Block { header: header_129, txdata: vec![revoked_htlc_txn[0].clone(), revoked_htlc_txn[1].clone()] }, 129);
 	let first;
 	let feerate_1;
 	let penalty_txn;
@@ -7876,13 +7879,13 @@ fn test_bump_penalty_txn_on_revoked_htlcs() {
 		let mut node_txn = nodes[0].tx_broadcaster.txn_broadcasted.lock().unwrap();
 		assert_eq!(node_txn.len(), 5); // 3 penalty txn on revoked commitment tx + A commitment tx + 1 penalty tnx on revoked HTLC txn
 		// Verify claim tx are spending revoked HTLC txn
-		assert_eq!(node_txn[3].input.len(), 2);
-		assert_eq!(node_txn[3].output.len(), 1);
-		check_spends!(node_txn[3], revoked_htlc_txn[0], revoked_htlc_txn[1]);
-		first = node_txn[3].txid();
+		assert_eq!(node_txn[4].input.len(), 2);
+		assert_eq!(node_txn[4].output.len(), 1);
+		check_spends!(node_txn[4], revoked_htlc_txn[0], revoked_htlc_txn[1]);
+		first = node_txn[4].txid();
 		// Store both feerates for later comparison
-		let fee_1 = revoked_htlc_txn[0].output[0].value + revoked_htlc_txn[1].output[0].value - node_txn[3].output[0].value;
-		feerate_1 = fee_1 * 1000 / node_txn[3].get_weight() as u64;
+		let fee_1 = revoked_htlc_txn[0].output[0].value + revoked_htlc_txn[1].output[0].value - node_txn[4].output[0].value;
+		feerate_1 = fee_1 * 1000 / node_txn[4].get_weight() as u64;
 		penalty_txn = vec![node_txn[0].clone(), node_txn[1].clone(), node_txn[2].clone()];
 		node_txn.clear();
 	}
