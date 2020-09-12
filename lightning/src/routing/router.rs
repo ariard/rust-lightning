@@ -187,6 +187,156 @@ struct PaymentPathInGraph {
 	fee_msat: u64,
 }
 
+/// Adds channel entry to the in-construction path.
+///
+/// Channel goes from src_node_id to dest_node_id over the channel with id chan_id with fees described as from src's relay policy
+fn add_entry(routing_state: &RoutingState, short_chan_id: u64, src_node_id: PublicKey,  dest_node_id: PublicKey, directional_info: DirectionalChannelInfo, capacity_sats: u64, chan_features: ChannelFeatures, starting_fee_msat: u64) {
+	//TODO: Explore simply adding fee to hit htlc_minimum_msat
+	if starting_fee_msat as u64 + final_value_msat >= directional_info.htlc_minimum_msat && !routing_state.channels_to_avoid.contains(&chan_id.clone()) {
+		let proportional_fee_millions = (starting_fee_msat + final_value_msat).checked_mul(directional_info.fees.proportional_millionths as u64);
+		if let Some(new_fee) = proportional_fee_millions.and_then(|part| {
+				(directional_info.fees.base_msat as u64).checked_add(part / 1000000) })
+		{
+			let mut total_fee = starting_fee_msat as u64;
+
+
+			let mut available_msat = capacity_sats;
+			if let Some(htlc_maximum_msat) = directional_info.htlc_maximum_msat {
+				if let Some(capacity_sats) = capacity_sats {
+					available_msat = Some(cmp::min(capacity_sats * 1000, htlc_maximum_msat));
+				} else {
+					available_msat = Some(htlc_maximum_msat);
+				}
+			}
+			if let Some(max_available_capacity_msat) = available_msat {
+			   if let Some(used_amount_msat) = routing_state.used_channels_with_amounts_msat.get(&chan_id.clone()) {
+					// Take into account amounts used in previous paths within the current call (as per MPP),
+					// so that multiple paths don't rely on the same capacity.
+					available_msat = Some(max_available_capacity_msat - used_amount_msat)
+				}
+			}
+
+			let hm_entry = routing_state.dist.entry(&src_node_id);
+			let old_entry = hm_entry.or_insert_with(|| {
+				// If there was previously no known way to access the source node (recall it goes dest-to-source) of $chan_id,
+				// first add a semi-dummy record just to compute the fees to reach the source node.
+				// This will affect our decision on selecting $chan_id as a way to reach the $dest_node_id.
+				let node = routing_state.network.get_nodes().get(&$src_node_id).unwrap();
+				let mut fee_base_msat = u32::max_value();
+				let mut fee_proportional_millionths = u32::max_value();
+				if let Some(fees) = node.lowest_inbound_channel_fees {
+					fee_base_msat = fees.base_msat;
+					fee_proportional_millionths = fees.proportional_millionths;
+				};
+				RouteHopInGraph {
+					route_hop: RouteHop {
+						pubkey: dest_node_id.clone(),
+						node_features: NodeFeatures::empty(),
+						short_channel_id: 0,
+						channel_features: chan_features.clone(),
+						fee_msat: 0,
+						cltv_expiry_delta: 0,
+					},
+					available_msat: None,
+					src_lowest_inbound_fees: RoutingFees {
+						base_msat: fee_base_msat,
+						proportional_millionths: fee_proportional_millionths,
+					},
+					channel_fees: directional_info.fees,
+					total_fee: u64::max_value(),
+				}
+			});
+			if src_node_id != *our_node_id {
+				// Ignore new_fee for channel-from-us as we assume all channels-from-us
+				// will have the same effective-fee
+				total_fee += new_fee;
+				if let Some(fee_inc) = final_value_msat.checked_add(total_fee).and_then(|inc| { (old_entry.src_lowest_inbound_fees.proportional_millionths as u64).checked_mul(inc) }) {
+					total_fee += fee_inc / 1000000 + (old_entry.src_lowest_inbound_fees.base_msat as u64);
+				} else {
+					// max_value means we'll always fail the old_entry.0 > total_fee check
+					total_fee = u64::max_value();
+				}
+			}
+			let new_graph_node = RouteGraphNode {
+				pubkey: src_node_id,
+				lowest_fee_to_peer_through_node: total_fee,
+				lowest_fee_to_node: starting_fee_msat as u64 + new_fee,
+			};
+			// Update the way of reaching $dest_node_id with the given $chan_id, if this way is cheaper
+			// then the already known (considering the cost to "reach" this channel from the end mode of the search,
+			// the cost of using this channel, and the cost of routing to the source node of this channel).
+			if old_entry.total_fee > total_fee {
+				routing_state.targets.push(new_graph_node);
+				old_entry.total_fee = total_fee;
+				old_entry.route_hop = RouteHop {
+					pubkey: dest_node_id.clone(),
+					node_features: NodeFeatures::empty(),
+					short_channel_id: chan_id.clone(),
+					channel_features: chan_features.clone(),
+					fee_msat: new_fee, // This field is ignored on the last-hop anyway
+					cltv_expiry_delta: directional_info.cltv_expiry_delta as u32,
+				};
+				old_entry.available_msat = available_msat;
+				old_entry.channel_fees = directional_info.fees;
+			}
+		}
+	}
+}
+
+fn add_entries_to_cheapest_to_target_node(routing_state: &RoutingState, node: NodeInfo, node_id: PublicKey, fee_to_target_msat: u64) {
+	if routing_state.first_hops.is_some() {
+		if let Some(&(ref first_hop, ref features)) = routing_state.first_hop_targets.get(&node_id) {
+			add_entry(routing_state, first_hop, *our_node_id, node_id, dummy_directional_info, None::<u64>, features.to_context(), fee_to_target_msat);
+		}
+	}
+
+	let features;
+	if let Some(node_info) = node.announcement_info.as_ref() {
+		features = node_info.features.clone();
+	} else {
+		features = NodeFeatures::empty();
+	}
+
+	if !features.requires_unknown_bits() {
+		for chan_id in node.channels.iter() {
+			if routing_state.channels_to_avoid.contains(chan_id) {
+				continue;
+			}
+			let chan = routing_state.network.get_channels().get(chan_id).unwrap();
+			if !chan.features.requires_unknown_bits() {
+				if chan.node_one == *node_id {
+					// ie $node is one, ie next hop in A* is two, via the two_to_one channel
+					if first_hops.is_none() || chan.node_two != *our_node_id {
+						if let Some(two_to_one) = chan.two_to_one.as_ref() {
+							if two_to_one.enabled {
+								add_entry(chan_id, chan.node_two, chan.node_one, two_to_one, chan.capacity_sats, chan.features, fee_to_target_msat);
+							}
+						}
+					}
+				} else {
+					if first_hops.is_none() || chan.node_one != *our_node_id {
+						if let Some(one_to_two) = chan.one_to_two.as_ref() {
+							if one_to_two.enabled {
+								add_entry(chan_id, chan.node_one, chan.node_two, one_to_two, chan.capacity_sats, chan.features, fee_to_target_msat);
+							}
+						}
+
+					}
+				}
+			}
+		}
+	}
+}
+
+struct RoutingState {
+	network: NetworkGraph,
+	first_hops: Option<&[&ChannelDetails]>,
+	first_hops_targets: HashMap<PubKey, (u64, ChannelFeatures),
+	channels_to_avoid: HashSet<PubKey>,
+	used_channels_with_amounts_msat: HashMap<u64>,
+	targets: Vec<RouteGraphNode>
+}
+
 /// Gets a route from us to the given target node.
 ///
 /// Extra routing hops between known nodes and the target will be used if they are included in
@@ -283,152 +433,6 @@ pub fn get_route<L: Deref>(our_node_id: &PublicKey, network: &NetworkGraph, targ
 	// This would help to make a better path finding decisions and not "overbook" channels.
 	let mut used_channels_with_amounts_msat = HashMap::new();
 
-	macro_rules! add_entry {
-		// Adds entry which goes from $src_node_id to $dest_node_id
-		// over the channel with id $chan_id with fees described in
-		// $directional_info.
-		( $chan_id: expr, $src_node_id: expr, $dest_node_id: expr, $directional_info: expr, $capacity_sats: expr, $chan_features: expr, $starting_fee_msat: expr ) => {
-
-			//TODO: Explore simply adding fee to hit htlc_minimum_msat
-			if $starting_fee_msat as u64 + final_value_msat >= $directional_info.htlc_minimum_msat && !channels_to_avoid.contains(&$chan_id.clone()) {
-				let proportional_fee_millions = ($starting_fee_msat + final_value_msat).checked_mul($directional_info.fees.proportional_millionths as u64);
-				if let Some(new_fee) = proportional_fee_millions.and_then(|part| {
-						($directional_info.fees.base_msat as u64).checked_add(part / 1000000) })
-				{
-					let mut total_fee = $starting_fee_msat as u64;
-
-
-					let mut available_msat = $capacity_sats;
-					if let Some(htlc_maximum_msat) = $directional_info.htlc_maximum_msat {
-						if let Some(capacity_sats) = $capacity_sats {
-							available_msat = Some(cmp::min(capacity_sats * 1000, htlc_maximum_msat));
-						} else {
-							available_msat = Some(htlc_maximum_msat);
-						}
-					}
-					if let Some(max_available_capacity_msat) = available_msat {
-					   if let Some(used_amount_msat) = used_channels_with_amounts_msat.get(&$chan_id.clone()) {
-							// Take into account amounts used in previous paths within the current call (as per MPP),
-							// so that multiple paths don't rely on the same capacity.
-							available_msat = Some(max_available_capacity_msat - used_amount_msat)
-						}
-					}
-
-					let hm_entry = dist.entry(&$src_node_id);
-					let old_entry = hm_entry.or_insert_with(|| {
-						// If there was previously no known way to access the source node (recall it goes dest-to-source) of $chan_id,
-						// first add a semi-dummy record just to compute the fees to reach the source node.
-						// This will affect our decision on selecting $chan_id as a way to reach the $dest_node_id.
-						let node = network.get_nodes().get(&$src_node_id).unwrap();
-						let mut fee_base_msat = u32::max_value();
-						let mut fee_proportional_millionths = u32::max_value();
-						if let Some(fees) = node.lowest_inbound_channel_fees {
-							fee_base_msat = fees.base_msat;
-							fee_proportional_millionths = fees.proportional_millionths;
-						};
-						RouteHopInGraph {
-							route_hop: RouteHop {
-								pubkey: $dest_node_id.clone(),
-								node_features: NodeFeatures::empty(),
-								short_channel_id: 0,
-								channel_features: $chan_features.clone(),
-								fee_msat: 0,
-								cltv_expiry_delta: 0,
-							},
-							available_msat: None,
-							src_lowest_inbound_fees: RoutingFees {
-								base_msat: fee_base_msat,
-								proportional_millionths: fee_proportional_millionths,
-							},
-							channel_fees: $directional_info.fees,
-							total_fee: u64::max_value(),
-						}
-					});
-					if $src_node_id != *our_node_id {
-						// Ignore new_fee for channel-from-us as we assume all channels-from-us
-						// will have the same effective-fee
-						total_fee += new_fee;
-						if let Some(fee_inc) = final_value_msat.checked_add(total_fee).and_then(|inc| { (old_entry.src_lowest_inbound_fees.proportional_millionths as u64).checked_mul(inc) }) {
-							total_fee += fee_inc / 1000000 + (old_entry.src_lowest_inbound_fees.base_msat as u64);
-						} else {
-							// max_value means we'll always fail the old_entry.0 > total_fee check
-							total_fee = u64::max_value();
-						}
-					}
-					let new_graph_node = RouteGraphNode {
-						pubkey: $src_node_id,
-						lowest_fee_to_peer_through_node: total_fee,
-						lowest_fee_to_node: $starting_fee_msat as u64 + new_fee,
-					};
-					// Update the way of reaching $dest_node_id with the given $chan_id, if this way is cheaper
-					// then the already known (considering the cost to "reach" this channel from the end mode of the search,
-					// the cost of using this channel, and the cost of routing to the source node of this channel).
-					if old_entry.total_fee > total_fee {
-						targets.push(new_graph_node);
-						old_entry.total_fee = total_fee;
-						old_entry.route_hop = RouteHop {
-							pubkey: $dest_node_id.clone(),
-							node_features: NodeFeatures::empty(),
-							short_channel_id: $chan_id.clone(),
-							channel_features: $chan_features.clone(),
-							fee_msat: new_fee, // This field is ignored on the last-hop anyway
-							cltv_expiry_delta: $directional_info.cltv_expiry_delta as u32,
-						};
-						old_entry.available_msat = available_msat;
-						old_entry.channel_fees = $directional_info.fees;
-					}
-				}
-			}
-		};
-	}
-
-	macro_rules! add_entries_to_cheapest_to_target_node {
-		( $node: expr, $node_id: expr, $fee_to_target_msat: expr ) => {
-			if first_hops.is_some() {
-				if let Some(&(ref first_hop, ref features)) = first_hop_targets.get(&$node_id) {
-					add_entry!(first_hop, *our_node_id, $node_id, dummy_directional_info, None::<u64>, features.to_context(), $fee_to_target_msat);
-				}
-			}
-
-			let features;
-			if let Some(node_info) = $node.announcement_info.as_ref() {
-				features = node_info.features.clone();
-			} else {
-				features = NodeFeatures::empty();
-			}
-
-			if !features.requires_unknown_bits() {
-				for chan_id in $node.channels.iter() {
-					if channels_to_avoid.contains(chan_id) {
-						continue;
-					}
-					let chan = network.get_channels().get(chan_id).unwrap();
-					if !chan.features.requires_unknown_bits() {
-						if chan.node_one == *$node_id {
-							// ie $node is one, ie next hop in A* is two, via the two_to_one channel
-							if first_hops.is_none() || chan.node_two != *our_node_id {
-								if let Some(two_to_one) = chan.two_to_one.as_ref() {
-									if two_to_one.enabled {
-										add_entry!(chan_id, chan.node_two, chan.node_one, two_to_one, chan.capacity_sats, chan.features, $fee_to_target_msat);
-									}
-								}
-							}
-						} else {
-							if first_hops.is_none() || chan.node_one != *our_node_id {
-								if let Some(one_to_two) = chan.one_to_two.as_ref() {
-									if one_to_two.enabled {
-										add_entry!(chan_id, chan.node_one, chan.node_two, one_to_two, chan.capacity_sats, chan.features, $fee_to_target_msat);
-									}
-								}
-
-							}
-						}
-					}
-				}
-			}
-		};
-	}
-
 	let mut payment_paths = Vec::new();
 	let mut tries_left = 10;
 	let mut found_amount_msat = 0;
@@ -445,7 +449,7 @@ pub fn get_route<L: Deref>(our_node_id: &PublicKey, network: &NetworkGraph, targ
 		match network.get_nodes().get(target) {
 			None => {},
 			Some(node) => {
-				add_entries_to_cheapest_to_target_node!(node, target, 0);
+				add_entries_to_cheapest_to_target_node(network, target, node, target, 0);
 			},
 		}
 
@@ -458,12 +462,12 @@ pub fn get_route<L: Deref>(our_node_id: &PublicKey, network: &NetworkGraph, targ
 							// bit lazy here. In the future, we should pull them out via our
 							// ChannelManager, but there's no reason to waste the space until we
 							// need them.
-							add_entry!(first_hop, *our_node_id , hop.src_node_id, dummy_directional_info, None::<u64>, features.to_context(), 0);
+							add_entry(first_hop, *our_node_id , hop.src_node_id, dummy_directional_info, None::<u64>, features.to_context(), 0);
 						}
 					}
 					// BOLT 11 doesn't allow inclusion of features for the last hop hints, which
 					// really sucks, cause we're gonna need that eventually.
-					add_entry!(hop.short_channel_id, hop.src_node_id, target, hop, None::<u64>, ChannelFeatures::empty(), 0);
+					add_entry(hop.short_channel_id, hop.src_node_id, target, hop, None::<u64>, ChannelFeatures::empty(), 0);
 				}
 			}
 		}
@@ -568,7 +572,7 @@ pub fn get_route<L: Deref>(our_node_id: &PublicKey, network: &NetworkGraph, targ
 			match network.get_nodes().get(&pubkey) {
 				None => {},
 				Some(node) => {
-					add_entries_to_cheapest_to_target_node!(node, &pubkey, lowest_fee_to_node);
+					add_entries_to_cheapest_to_target_node(node, &pubkey, lowest_fee_to_node);
 				},
 			}
 		}
