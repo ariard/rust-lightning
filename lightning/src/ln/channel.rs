@@ -445,7 +445,7 @@ macro_rules! secp_check {
 impl<ChanSigner: ChannelKeys> Channel<ChanSigner> {
 	// Convert constants + channel value to limits:
 	fn get_holder_max_htlc_value_in_flight_msat(channel_value_satoshis: u64) -> u64 {
-		channel_value_satoshis * 1000 / 10 //TODO
+		channel_value_satoshis * 10000 / 10 //TODO
 	}
 
 	/// Returns a minimum channel reserve value the remote needs to maintain,

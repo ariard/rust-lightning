@@ -1682,6 +1682,7 @@ impl<ChanSigner: ChannelKeys> ChannelMonitor<ChanSigner> {
 					L::Target: Logger,
 	{
 		let txn_matched = self.filter_block(txdata);
+		println!("Transaction matched {}", txn_matched.len());
 		for tx in &txn_matched {
 			let mut output_val = 0;
 			for out in tx.output.iter() {

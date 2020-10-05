@@ -96,6 +96,7 @@ impl<ChanSigner: ChannelKeys, C: Deref, T: Deref, F: Deref, L: Deref> ChainMonit
 			if let Some(ref chain_source) = self.chain_source {
 				for (txid, outputs) in txn_outputs.drain(..) {
 					for (idx, output) in outputs.iter().enumerate() {
+						println!("Registering output at idx {}", idx);
 						chain_source.register_output(&OutPoint { txid, index: idx as u16 }, &output.script_pubkey);
 					}
 				}
