@@ -40,7 +40,7 @@ use bitcoin::secp256k1;
 use ln::msgs::DecodeError;
 use ln::chan_utils;
 use ln::chan_utils::{CounterpartyCommitmentSecrets, HTLCOutputInCommitment, HolderCommitmentTransaction, HTLCType};
-use ln::channelmanager::{HTLCSource, PaymentPreimage, PaymentHash};
+use ln::channelmanager::{HTLCSource, PaymentPreimage, PaymentHash, MonitorUpdateInfo};
 use ln::onchaintx::{OnchainTxHandler, InputDescriptors};
 use chain::chaininterface::{BroadcasterInterface, FeeEstimator};
 use chain::transaction::{OutPoint, TransactionData};
@@ -182,9 +182,10 @@ pub enum MonitorEvent {
 pub struct HTLCUpdate {
 	pub(crate) payment_hash: PaymentHash,
 	pub(crate) payment_preimage: Option<PaymentPreimage>,
-	pub(crate) source: HTLCSource
+	pub(crate) source: HTLCSource,
+	pub(crate) monitor_info: MonitorUpdateInfo
 }
-impl_writeable!(HTLCUpdate, 0, { payment_hash, payment_preimage, source });
+impl_writeable!(HTLCUpdate, 0, { payment_hash, payment_preimage, source, monitor_info });
 
 /// If an HTLC expires within this many blocks, don't try to claim it in a shared transaction,
 /// instead claiming it in its own individual transaction.
@@ -1747,10 +1748,15 @@ impl<ChanSigner: ChannelKeys> ChannelMonitor<ChanSigner> {
 				match ev {
 					OnchainEvent::HTLCUpdate { htlc_update } => {
 						log_trace!(logger, "HTLC {} failure update has got enough confirmations to be passed upstream", log_bytes!((htlc_update.1).0));
+						let latest_monitor_update_id = self.get_latest_update_id();
 						self.pending_monitor_events.push(MonitorEvent::HTLCEvent(HTLCUpdate {
 							payment_hash: htlc_update.1,
 							payment_preimage: None,
 							source: htlc_update.0,
+							monitor_info: MonitorUpdateInfo {
+								funding_outpoint: self.funding_info.0,
+								latest_monitor_update_id
+							}
 						}));
 					},
 					OnchainEvent::MaturingOutput { descriptor } => {
@@ -2016,10 +2022,15 @@ impl<ChanSigner: ChannelKeys> ChannelMonitor<ChanSigner> {
 					if !self.pending_monitor_events.iter().any(
 						|update| if let &MonitorEvent::HTLCEvent(ref upd) = update { upd.source == source } else { false }) {
 						payment_preimage.0.copy_from_slice(&input.witness[3]);
+						let latest_monitor_update_id = self.get_latest_update_id();
 						self.pending_monitor_events.push(MonitorEvent::HTLCEvent(HTLCUpdate {
 							source,
 							payment_preimage: Some(payment_preimage),
-							payment_hash
+							payment_hash,
+							monitor_info: MonitorUpdateInfo {
+								funding_outpoint: self.funding_info.0,
+								latest_monitor_update_id
+							}
 						}));
 					}
 				} else if offered_preimage_claim {
@@ -2028,10 +2039,15 @@ impl<ChanSigner: ChannelKeys> ChannelMonitor<ChanSigner> {
 							upd.source == source
 						} else { false }) {
 						payment_preimage.0.copy_from_slice(&input.witness[1]);
+						let latest_monitor_update_id = self.get_latest_update_id();
 						self.pending_monitor_events.push(MonitorEvent::HTLCEvent(HTLCUpdate {
 							source,
 							payment_preimage: Some(payment_preimage),
-							payment_hash
+							payment_hash,
+							monitor_info: MonitorUpdateInfo {
+								funding_outpoint: self.funding_info.0,
+								latest_monitor_update_id
+							}
 						}));
 					}
 				} else {

@@ -37,7 +37,7 @@ use bitcoin::secp256k1;
 use chain;
 use chain::Watch;
 use chain::chaininterface::{BroadcasterInterface, FeeEstimator};
-use chain::channelmonitor::{ChannelMonitor, ChannelMonitorUpdate, ChannelMonitorUpdateErr, HTLC_FAIL_BACK_BUFFER, CLTV_CLAIM_BUFFER, LATENCY_GRACE_PERIOD_BLOCKS, ANTI_REORG_DELAY, MonitorEvent};
+use chain::channelmonitor::{ChannelMonitor, ChannelMonitorUpdate, ChannelMonitorUpdateStep, ChannelMonitorUpdateErr, HTLC_FAIL_BACK_BUFFER, CLTV_CLAIM_BUFFER, LATENCY_GRACE_PERIOD_BLOCKS, ANTI_REORG_DELAY, MonitorEvent};
 use chain::transaction::{OutPoint, TransactionData};
 use ln::channel::{Channel, ChannelError};
 use ln::features::{InitFeatures, NodeFeatures};
@@ -697,6 +697,19 @@ macro_rules! maybe_break_monitor_err {
 		}
 	}
 }
+
+/// When claiming a payment after receiving a preimage, there's a rare case
+/// where the channel hits the chain before the `ChannelMonitor` can be updated
+/// with knowledge of the preimage. Thus, monitor information needs to be passed
+/// to the `ChannelManager` on receipt of a preimage so it's capable of updating
+/// the relevant `ChannelMonitor` after the channel's data has been removed from
+/// the `ChannelManager`'s `ChannelHolder`.
+#[derive(Clone, PartialEq)]
+pub(crate) struct MonitorUpdateInfo {
+	pub(crate) funding_outpoint: OutPoint,
+	pub(crate) latest_monitor_update_id: u64
+}
+impl_writeable!(MonitorUpdateInfo, 0, { funding_outpoint, latest_monitor_update_id });
 
 impl<ChanSigner: ChannelKeys, M: Deref, T: Deref, K: Deref, F: Deref, L: Deref> ChannelManager<ChanSigner, M, T, K, F, L>
 	where M::Target: chain::Watch<Keys=ChanSigner>,
@@ -2125,7 +2138,7 @@ impl<ChanSigner: ChannelKeys, M: Deref, T: Deref, K: Deref, F: Deref, L: Deref> 
 		} else { unreachable!(); }
 	}
 
-	fn claim_funds_internal(&self, mut channel_state_lock: MutexGuard<ChannelHolder<ChanSigner>>, source: HTLCSource, payment_preimage: PaymentPreimage) {
+	fn claim_funds_internal(&self, mut channel_state_lock: MutexGuard<ChannelHolder<ChanSigner>>, source: HTLCSource, payment_preimage: PaymentPreimage, monitor_update_info: MonitorUpdateInfo) {
 		match source {
 			HTLCSource::OutboundRoute { .. } => {
 				mem::drop(channel_state_lock);
@@ -2138,9 +2151,15 @@ impl<ChanSigner: ChannelKeys, M: Deref, T: Deref, K: Deref, F: Deref, L: Deref> 
 				if let Err((counterparty_node_id, err)) = match self.claim_funds_from_hop(&mut channel_state_lock, hop_data, payment_preimage) {
 					Ok(()) => Ok(()),
 					Err(None) => {
-						// TODO: There is probably a channel monitor somewhere that needs to
-						// learn the preimage as the channel already hit the chain and that's
-						// why it's missing.
+						let preimage_update = ChannelMonitorUpdate {
+							update_id: monitor_update_info.latest_monitor_update_id,
+							updates: vec![ChannelMonitorUpdateStep::PaymentPreimage {
+								payment_preimage: payment_preimage.clone(),
+							}],
+						};
+						if let Err(_) = self.chain_monitor.update_channel(monitor_update_info.funding_outpoint, preimage_update) {
+							// TODO(val): figure out what to do here
+						}
 						Ok(())
 					},
 					Err(Some(res)) => Err(res),
@@ -2582,7 +2601,7 @@ impl<ChanSigner: ChannelKeys, M: Deref, T: Deref, K: Deref, F: Deref, L: Deref> 
 
 	fn internal_update_fulfill_htlc(&self, counterparty_node_id: &PublicKey, msg: &msgs::UpdateFulfillHTLC) -> Result<(), MsgHandleErrInternal> {
 		let mut channel_lock = self.channel_state.lock().unwrap();
-		let htlc_source = {
+		let (htlc_source, monitor_info) = {
 			let channel_state = &mut *channel_lock;
 			match channel_state.by_id.entry(msg.channel_id) {
 				hash_map::Entry::Occupied(mut chan) => {
@@ -2594,7 +2613,7 @@ impl<ChanSigner: ChannelKeys, M: Deref, T: Deref, K: Deref, F: Deref, L: Deref> 
 				hash_map::Entry::Vacant(_) => return Err(MsgHandleErrInternal::send_err_msg_no_close("Failed to find corresponding channel".to_owned(), msg.channel_id))
 			}
 		};
-		self.claim_funds_internal(channel_lock, htlc_source, msg.payment_preimage.clone());
+		self.claim_funds_internal(channel_lock, htlc_source, msg.payment_preimage.clone(), monitor_info);
 		Ok(())
 	}
 
@@ -2980,7 +2999,7 @@ impl<ChanSigner: ChannelKeys, M: Deref, T: Deref, K: Deref, F: Deref, L: Deref> 
 					MonitorEvent::HTLCEvent(htlc_update) => {
 						if let Some(preimage) = htlc_update.payment_preimage {
 							log_trace!(self.logger, "Claiming HTLC with preimage {} from our monitor", log_bytes!(preimage.0));
-							self.claim_funds_internal(self.channel_state.lock().unwrap(), htlc_update.source, preimage);
+							self.claim_funds_internal(self.channel_state.lock().unwrap(), htlc_update.source, preimage, htlc_update.monitor_info);
 						} else {
 							log_trace!(self.logger, "Failing HTLC with hash {} from our monitor", log_bytes!(htlc_update.payment_hash.0));
 							self.fail_htlc_backwards_internal(self.channel_state.lock().unwrap(), htlc_update.source, &htlc_update.payment_hash, HTLCFailReason::Reason { failure_code: 0x4000 | 8, data: Vec::new() });
