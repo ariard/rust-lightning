@@ -814,6 +814,9 @@ mod tests {
 	use bitcoin::hashes::Hash;
 	use bitcoin::network::constants::Network;
 	use bitcoin::blockdata::constants::genesis_block;
+	use bitcoin::blockdata::script::Builder;
+	use bitcoin::blockdata::opcodes;
+	use bitcoin::blockdata::transaction::TxOut;
 
 	use hex;
 
@@ -862,8 +865,7 @@ mod tests {
 
 		match net_graph_msg_handler.handle_channel_update(&valid_channel_update) {
 			Ok(res) => assert!(res),
-			// Err(_) => panic!()
-			Err(e) => println!("{:?}", e.err)
+			Err(_) => panic!()
 		};
 	}
 
@@ -921,9 +923,10 @@ mod tests {
 		}
 	}
 
-	fn build_graph() -> (Secp256k1<All>, NetGraphMsgHandler<std::sync::Arc<crate::util::test_utils::TestChainSource>, std::sync::Arc<crate::util::test_utils::TestLogger>>, std::sync::Arc<test_utils::TestLogger>) {
+	fn build_graph() -> (Secp256k1<All>, NetGraphMsgHandler<std::sync::Arc<test_utils::TestChainSource>, std::sync::Arc<crate::util::test_utils::TestLogger>>, std::sync::Arc<test_utils::TestChainSource>, std::sync::Arc<test_utils::TestLogger>) {
 		let secp_ctx = Secp256k1::new();
 		let logger = Arc::new(test_utils::TestLogger::new());
+		let chain_monitor = Arc::new(test_utils::TestChainSource::new(Network::Testnet));
 		let net_graph_msg_handler = NetGraphMsgHandler::new(None, Arc::clone(&logger));
 		// Build network from our_id to node7:
 		//
@@ -1220,12 +1223,12 @@ mod tests {
 
 		add_or_update_node(&net_graph_msg_handler, &secp_ctx, &privkeys[5], NodeFeatures::from_le_bytes(id_to_feature_flags(6)), 0);
 
-		(secp_ctx, net_graph_msg_handler, logger)
+		(secp_ctx, net_graph_msg_handler, chain_monitor, logger)
 	}
 
 	#[test]
 	fn simple_route_test() {
-		let (secp_ctx, net_graph_msg_handler, logger) = build_graph();
+		let (secp_ctx, net_graph_msg_handler, _, logger) = build_graph();
 		let (_, our_id, _, nodes) = get_nodes(&secp_ctx);
 
 		// Simple route to 3 via 2
@@ -1249,7 +1252,7 @@ mod tests {
 
 	#[test]
 	fn disable_channels_test() {
-		let (secp_ctx, net_graph_msg_handler, logger) = build_graph();
+		let (secp_ctx, net_graph_msg_handler, _, logger) = build_graph();
 		let (our_privkey, our_id, privkeys, nodes) = get_nodes(&secp_ctx);
 
 		// // Disable channels 4 and 12 by flags=2
@@ -1315,7 +1318,7 @@ mod tests {
 
 	#[test]
 	fn disable_node_test() {
-		let (secp_ctx, net_graph_msg_handler, logger) = build_graph();
+		let (secp_ctx, net_graph_msg_handler, _, logger) = build_graph();
 		let (_, our_id, privkeys, nodes) = get_nodes(&secp_ctx);
 
 		// Disable nodes 1, 2, and 8 by requiring unknown feature bits
@@ -1366,7 +1369,7 @@ mod tests {
 
 	#[test]
 	fn our_chans_test() {
-		let (secp_ctx, net_graph_msg_handler, logger) = build_graph();
+		let (secp_ctx, net_graph_msg_handler, _, logger) = build_graph();
 		let (_, our_id, _, nodes) = get_nodes(&secp_ctx);
 
 		// Route to 1 via 2 and 3 because our channel to 1 is disabled
@@ -1458,7 +1461,7 @@ mod tests {
 
 	#[test]
 	fn last_hops_test() {
-		let (secp_ctx, net_graph_msg_handler, logger) = build_graph();
+		let (secp_ctx, net_graph_msg_handler, _, logger) = build_graph();
 		let (_, our_id, _, nodes) = get_nodes(&secp_ctx);
 
 		// Simple test across 2, 3, 5, and 4 via a last_hop channel
@@ -1505,7 +1508,7 @@ mod tests {
 
 	#[test]
 	fn our_chans_last_hop_connect_test() {
-		let (secp_ctx, net_graph_msg_handler, logger) = build_graph();
+		let (secp_ctx, net_graph_msg_handler, _, logger) = build_graph();
 		let (_, our_id, _, nodes) = get_nodes(&secp_ctx);
 
 		// Simple test with outbound channel to 4 to test that last_hops and first_hops connect
@@ -1617,8 +1620,222 @@ mod tests {
 	}
 
 	#[test]
+	fn available_amount_while_routing_test() {
+		// Tests whether we choose the correct available channel amount while routing.
+		
+		let (secp_ctx, mut net_graph_msg_handler, chain_monitor, logger) = build_graph();
+		let (our_privkey, our_id, privkeys, nodes) = get_nodes(&secp_ctx);
+
+		// We will use a simple single-path route from our node to node2 via node0: channels {1, 3}.
+
+		// First disable all other paths.
+		update_channel(&net_graph_msg_handler, &secp_ctx, &our_privkey, UnsignedChannelUpdate {
+			chain_hash: genesis_block(Network::Testnet).header.block_hash(),
+			short_channel_id: 2,
+			timestamp: 2,
+			flags: 2,
+			cltv_expiry_delta: 0,
+			htlc_minimum_msat: 0,
+			htlc_maximum_msat: OptionalField::Present(100_000),
+			fee_base_msat: 0,
+			fee_proportional_millionths: 0,
+			excess_data: Vec::new()
+		});
+		update_channel(&net_graph_msg_handler, &secp_ctx, &our_privkey, UnsignedChannelUpdate {
+			chain_hash: genesis_block(Network::Testnet).header.block_hash(),
+			short_channel_id: 12,
+			timestamp: 2,
+			flags: 2,
+			cltv_expiry_delta: 0,
+			htlc_minimum_msat: 0,
+			htlc_maximum_msat: OptionalField::Present(100_000),
+			fee_base_msat: 0,
+			fee_proportional_millionths: 0,
+			excess_data: Vec::new()
+		});
+
+		// Make the first channel (#1) is very permissive, and we will be testing all limits on the second channel.
+		update_channel(&net_graph_msg_handler, &secp_ctx, &our_privkey, UnsignedChannelUpdate {
+			chain_hash: genesis_block(Network::Testnet).header.block_hash(),
+			short_channel_id: 1,
+			timestamp: 2,
+			flags: 0,
+			cltv_expiry_delta: 0,
+			htlc_minimum_msat: 0,
+			htlc_maximum_msat: OptionalField::Present(100_000_000),
+			fee_base_msat: 0,
+			fee_proportional_millionths: 0,
+			excess_data: Vec::new()
+		});
+
+		// First, let's see if routing works if we have absolutely no idea about the available amount.
+		// In this case, it should be set to 10_000 sats.
+		update_channel(&net_graph_msg_handler, &secp_ctx, &privkeys[0], UnsignedChannelUpdate {
+			chain_hash: genesis_block(Network::Testnet).header.block_hash(),
+			short_channel_id: 3,
+			timestamp: 2,
+			flags: 0,
+			cltv_expiry_delta: 0,
+			htlc_minimum_msat: 0,
+			htlc_maximum_msat: OptionalField::Absent,
+			fee_base_msat: 0,
+			fee_proportional_millionths: 0,
+			excess_data: Vec::new()
+		});
+
+		{
+			// Attempt to route more than is available results in a failure.
+			if let Err(LightningError{err, action: ErrorAction::IgnoreError}) = get_route(&our_id, &net_graph_msg_handler.network_graph.read().unwrap(), &nodes[2], None, &Vec::new(), 10_000_001, 42, Arc::clone(&logger)) {
+				assert_eq!(err, "Failed to find a sufficient route to the given destination");
+			} else { panic!(); }
+		}
+
+		{
+			// Now, attempt to route an exact amount we have should be fine.
+			let route = get_route(&our_id, &net_graph_msg_handler.network_graph.read().unwrap(), &nodes[2], None, &Vec::new(), 10_000_000, 42, Arc::clone(&logger)).unwrap();
+			assert_eq!(route.paths.len(), 1);
+			let path = route.paths.last().unwrap();
+			assert_eq!(path.len(), 2);
+			assert_eq!(path.last().unwrap().pubkey, nodes[2]);
+			assert_eq!(path.last().unwrap().fee_msat, 10_000_000);
+		}
+
+
+		// Now let's see if routing works if we know only htlc_maximum_msat.
+		update_channel(&net_graph_msg_handler, &secp_ctx, &privkeys[0], UnsignedChannelUpdate {
+			chain_hash: genesis_block(Network::Testnet).header.block_hash(),
+			short_channel_id: 3,
+			timestamp: 3,
+			flags: 0,
+			cltv_expiry_delta: 0,
+			htlc_minimum_msat: 0,
+			htlc_maximum_msat: OptionalField::Present(15_000),
+			fee_base_msat: 0,
+			fee_proportional_millionths: 0,
+			excess_data: Vec::new()
+		});
+
+		{
+			// Attempt to route more than is available results in a failure.
+			if let Err(LightningError{err, action: ErrorAction::IgnoreError}) = get_route(&our_id, &net_graph_msg_handler.network_graph.read().unwrap(), &nodes[2], None, &Vec::new(), 15_001, 42, Arc::clone(&logger)) {
+				assert_eq!(err, "Failed to find a sufficient route to the given destination");
+			} else { panic!(); }
+		}
+
+		{
+			// Now, attempt to route an exact amount we have should be fine.
+			let route = get_route(&our_id, &net_graph_msg_handler.network_graph.read().unwrap(), &nodes[2], None, &Vec::new(), 15_000, 42, Arc::clone(&logger)).unwrap();
+			assert_eq!(route.paths.len(), 1);
+			let path = route.paths.last().unwrap();
+			assert_eq!(path.len(), 2);
+			assert_eq!(path.last().unwrap().pubkey, nodes[2]);
+			assert_eq!(path.last().unwrap().fee_msat, 15_000);
+		}
+
+		// Now let's see if routing works if we know only capacity from the UTXO.
+
+		// We can't change UTXO capacity on the fly, so we'll disable the existing channel and add another one with
+		// the capacity we need.
+		update_channel(&net_graph_msg_handler, &secp_ctx, &privkeys[0], UnsignedChannelUpdate {
+			chain_hash: genesis_block(Network::Testnet).header.block_hash(),
+			short_channel_id: 3,
+			timestamp: 4,
+			flags: 2,
+			cltv_expiry_delta: 0,
+			htlc_minimum_msat: 0,
+			htlc_maximum_msat: OptionalField::Absent,
+			fee_base_msat: 0,
+			fee_proportional_millionths: 0,
+			excess_data: Vec::new()
+		});
+
+		let good_script = Builder::new().push_opcode(opcodes::all::OP_PUSHNUM_2)
+		.push_slice(&PublicKey::from_secret_key(&secp_ctx, &privkeys[0]).serialize())
+		.push_slice(&PublicKey::from_secret_key(&secp_ctx, &privkeys[2]).serialize())
+		.push_opcode(opcodes::all::OP_PUSHNUM_2)
+		.push_opcode(opcodes::all::OP_CHECKMULTISIG).into_script().to_v0_p2wsh();
+
+		*chain_monitor.utxo_ret.lock().unwrap() = Ok(TxOut { value: 15, script_pubkey: good_script.clone() });
+		net_graph_msg_handler.add_chain_access(Some(chain_monitor));
+
+		add_channel(&net_graph_msg_handler, &secp_ctx, &privkeys[0], &privkeys[2], ChannelFeatures::from_le_bytes(id_to_feature_flags(3)), 333);
+		update_channel(&net_graph_msg_handler, &secp_ctx, &privkeys[0], UnsignedChannelUpdate {
+			chain_hash: genesis_block(Network::Testnet).header.block_hash(),
+			short_channel_id: 333,
+			timestamp: 1,
+			flags: 0,
+			cltv_expiry_delta: (3 << 8) | 1,
+			htlc_minimum_msat: 0,
+			htlc_maximum_msat: OptionalField::Absent,
+			fee_base_msat: 0,
+			fee_proportional_millionths: 0,
+			excess_data: Vec::new()
+		});
+		update_channel(&net_graph_msg_handler, &secp_ctx, &privkeys[2], UnsignedChannelUpdate {
+			chain_hash: genesis_block(Network::Testnet).header.block_hash(),
+			short_channel_id: 333,
+			timestamp: 1,
+			flags: 1,
+			cltv_expiry_delta: (3 << 8) | 2,
+			htlc_minimum_msat: 0,
+			htlc_maximum_msat: OptionalField::Absent,
+			fee_base_msat: 100,
+			fee_proportional_millionths: 0,
+			excess_data: Vec::new()
+		});
+
+		{
+			// Attempt to route more than is available results in a failure.
+			if let Err(LightningError{err, action: ErrorAction::IgnoreError}) = get_route(&our_id, &net_graph_msg_handler.network_graph.read().unwrap(), &nodes[2], None, &Vec::new(), 15_001, 42, Arc::clone(&logger)) {
+				assert_eq!(err, "Failed to find a sufficient route to the given destination");
+			} else { panic!(); }
+		}
+
+		{
+			// Now, attempt to route an exact amount we have should be fine.
+			let route = get_route(&our_id, &net_graph_msg_handler.network_graph.read().unwrap(), &nodes[2], None, &Vec::new(), 15_000, 42, Arc::clone(&logger)).unwrap();
+			assert_eq!(route.paths.len(), 1);
+			let path = route.paths.last().unwrap();
+			assert_eq!(path.len(), 2);
+			assert_eq!(path.last().unwrap().pubkey, nodes[2]);
+			assert_eq!(path.last().unwrap().fee_msat, 15_000);
+		}
+
+		// Now let's see if routing chooses htlc_maximum_msat over UTXO capacity.
+		update_channel(&net_graph_msg_handler, &secp_ctx, &privkeys[0], UnsignedChannelUpdate {
+			chain_hash: genesis_block(Network::Testnet).header.block_hash(),
+			short_channel_id: 333,
+			timestamp: 6,
+			flags: 0,
+			cltv_expiry_delta: 0,
+			htlc_minimum_msat: 0,
+			htlc_maximum_msat: OptionalField::Present(10_000),
+			fee_base_msat: 0,
+			fee_proportional_millionths: 0,
+			excess_data: Vec::new()
+		});
+
+		{
+			// Attempt to route more than is available results in a failure.
+			if let Err(LightningError{err, action: ErrorAction::IgnoreError}) = get_route(&our_id, &net_graph_msg_handler.network_graph.read().unwrap(), &nodes[2], None, &Vec::new(), 10_001, 42, Arc::clone(&logger)) {
+				assert_eq!(err, "Failed to find a sufficient route to the given destination");
+			} else { panic!(); }
+		}
+
+		{
+			// Now, attempt to route an exact amount we have should be fine.
+			let route = get_route(&our_id, &net_graph_msg_handler.network_graph.read().unwrap(), &nodes[2], None, &Vec::new(), 10_000, 42, Arc::clone(&logger)).unwrap();
+			assert_eq!(route.paths.len(), 1);
+			let path = route.paths.last().unwrap();
+			assert_eq!(path.len(), 2);
+			assert_eq!(path.last().unwrap().pubkey, nodes[2]);
+			assert_eq!(path.last().unwrap().fee_msat, 10_000);
+		}
+	}
+
+	#[test]
 	fn simple_mpp_route_test() {
-		let (secp_ctx, net_graph_msg_handler, logger) = build_graph();
+		let (secp_ctx, net_graph_msg_handler, _, logger) = build_graph();
 		let (our_privkey, our_id, privkeys, nodes) = get_nodes(&secp_ctx);
 
 		// We need a route consisting of 3 paths:
@@ -1745,7 +1962,7 @@ mod tests {
 
 	#[test]
 	fn long_mpp_route_test() {
-		let (secp_ctx, net_graph_msg_handler, logger) = build_graph();
+		let (secp_ctx, net_graph_msg_handler, _, logger) = build_graph();
 		let (our_privkey, our_id, privkeys, nodes) = get_nodes(&secp_ctx);
 
 		// We need a route consisting of 35 paths:
@@ -1905,7 +2122,7 @@ mod tests {
 
 	#[test]
 	fn fees_on_mpp_route_test() {
-		let (secp_ctx, net_graph_msg_handler, logger) = build_graph();
+		let (secp_ctx, net_graph_msg_handler, _, logger) = build_graph();
 		let (our_privkey, our_id, privkeys, nodes) = get_nodes(&secp_ctx);
 
 		// We need a route consisting of 2 paths:
