@@ -8490,3 +8490,108 @@ fn test_htlc_no_detection() {
         connect_blocks(&nodes[0], ANTI_REORG_DELAY - 1, 201, true, header_201.block_hash());
         expect_payment_failed!(nodes[0], our_payment_hash, true);
 }
+
+#[test]
+fn test_unorderded_onchain_htlc_settlement() {
+	// A routing node must correctly claim an incoming HTLC for which the preimage has
+	// been learnt on the offchain upstream channel after the downstream one has reached
+	// the chain. HTLC settlement is ordered but not the underlying channel supporting
+	// the payment path.
+	//
+	// 1) Alice send a HTLC to Caroll through Bob.
+	// 2) Caroll doesn't settle the HTLC.
+	// 3) Alice close her channel with Bob.
+	// 4) Bob sees the Alice's commitment on his chain. An offered output is present but can't
+	// be claimed as Bob doesn't have yet knowledge of the preimage.
+	// 5) Caroll release offchain the preimage to Bob.
+	// 6) Bob claims the offered output on Alice's commitment.
+	// TODO: reverse the test with Bob's commitment reaching the chain instead of Alice's one.
+
+        let chanmon_cfgs = create_chanmon_cfgs(3);
+        let node_cfgs = create_node_cfgs(3, &chanmon_cfgs);
+        let node_chanmgrs = create_node_chanmgrs(3, &node_cfgs, &[None, None, None]);
+        let nodes = create_network(3, &node_cfgs, &node_chanmgrs);
+
+        // Create some initial channels
+        let chan_ab = create_announced_chan_between_nodes_with_value(&nodes, 0, 1, 100000, 10001, InitFeatures::known(), InitFeatures::known());
+        create_announced_chan_between_nodes_with_value(&nodes, 1, 2, 100000, 10001, InitFeatures::known(), InitFeatures::known());
+
+	// Step 1) and Step 2), `route_payment` implicitly verify Caroll receives the HTLC
+	let (payment_preimage, _payment_hash) = route_payment(&nodes[0], &vec!(&nodes[1], &nodes[2]), 3_000_000);
+
+	let alice_txn = get_local_commitment_txn!(nodes[0], chan_ab.2);
+	check_spends!(alice_txn[0], chan_ab.3);
+	assert_eq!(alice_txn[0].output.len(), 2);
+	check_spends!(alice_txn[1], alice_txn[0]); // 2nd transaction is a non-final HTLC-timeout
+	assert_eq!(alice_txn[1].input[0].witness.last().unwrap().len(), OFFERED_HTLC_SCRIPT_WEIGHT);
+	assert_eq!(alice_txn.len(), 2);
+
+	// Step 3) and Step 4), verify that Bob updates his monitor, broadcast a close and didn't broadcast
+	// yet transaction on Alice's commitment
+	let header = BlockHeader { version: 0x20000000, prev_blockhash: Default::default(), merkle_root: Default::default(), time: 42, bits: 42, nonce: 42};
+	connect_block(&nodes[1], &Block { header, txdata: vec![alice_txn[0].clone()]}, 1);
+	check_closed_broadcast!(nodes[1], false);
+	check_added_monitors!(nodes[1], 1);
+	{
+		let mut bob_txn = nodes[1].tx_broadcaster.txn_broadcasted.lock().unwrap(); // ChannelManager : 1 (commitment tx)
+		assert_eq!(bob_txn.len(), 1);
+		check_spends!(bob_txn[0], chan_ab.3);
+		bob_txn.clear();
+	}
+
+	// Step 5)
+	assert!(nodes[2].node.claim_funds(payment_preimage, &None, 3_000_000));
+	check_added_monitors!(nodes[2], 1);
+	let caroll_updates = get_htlc_update_msgs!(nodes[2], nodes[1].node.get_our_node_id());
+	assert!(caroll_updates.update_add_htlcs.is_empty());
+	assert!(caroll_updates.update_fail_htlcs.is_empty());
+	assert!(caroll_updates.update_fail_malformed_htlcs.is_empty());
+	assert!(caroll_updates.update_fee.is_none());
+	assert_eq!(caroll_updates.update_fulfill_htlcs.len(), 1);
+
+	nodes[1].node.handle_update_fulfill_htlc(&nodes[2].node.get_our_node_id(), &caroll_updates.update_fulfill_htlcs[0]);
+	nodes[1].node.handle_commitment_signed(&nodes[2].node.get_our_node_id(), &caroll_updates.commitment_signed);
+	check_added_monitors!(nodes[1], 1);
+
+	let events = nodes[1].node.get_and_clear_pending_msg_events();
+	assert_eq!(events.len(), 2);
+	let bob_revocation = match events[0] {
+		MessageSendEvent::SendRevokeAndACK { ref node_id, ref msg } => {
+			assert_eq!(*node_id, nodes[2].node.get_our_node_id());
+			(*msg).clone()
+		},
+		_ => panic!("Unexpected event"),
+	};
+	let bob_updates = match events[1] {
+		MessageSendEvent::UpdateHTLCs { ref node_id, ref updates } => {
+			assert_eq!(*node_id, nodes[2].node.get_our_node_id());
+			(*updates).clone()
+		},
+		_ => panic!("Unexpected event"),
+	};
+
+	nodes[2].node.handle_revoke_and_ack(&nodes[1].node.get_our_node_id(), &bob_revocation);
+	check_added_monitors!(nodes[2], 1);
+	nodes[2].node.handle_commitment_signed(&nodes[1].node.get_our_node_id(), &bob_updates.commitment_signed);
+	check_added_monitors!(nodes[2], 1);
+
+	let events = nodes[2].node.get_and_clear_pending_msg_events();
+	assert_eq!(events.len(), 1);
+	let caroll_revocation = match events[0] {
+		MessageSendEvent::SendRevokeAndACK { ref node_id, ref msg } => {
+			assert_eq!(*node_id, nodes[1].node.get_our_node_id());
+			(*msg).clone()
+		},
+		_ => panic!("Unexpected event"),
+	};
+	nodes[1].node.handle_revoke_and_ack(&nodes[2].node.get_our_node_id(), &caroll_revocation);
+	check_added_monitors!(nodes[1], 1);
+
+	// Step 6), verify Bob broadcast a preimage transaction on Alice's commitment
+	{
+		let bob_txn = nodes[1].tx_broadcaster.txn_broadcasted.lock().unwrap().clone(); // ChannelMonitor : 1 (htlc-preimage tx)
+		assert_eq!(bob_txn.len(), 1);
+		check_spends!(bob_txn[0], alice_txn[0]);
+		assert_eq!(bob_txn[0].input[0].witness.last().unwrap().len(), OFFERED_HTLC_SCRIPT_WEIGHT);
+	}
+}
