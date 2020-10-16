@@ -1563,7 +1563,7 @@ impl<ChanSigner: ChannelKeys> Channel<ChanSigner> {
 				                                              &counterparty_pubkeys.htlc_basepoint, &counterparty_pubkeys.delayed_payment_basepoint,
 				                                              self.counterparty_selected_contest_delay, funding_redeemscript.clone(), self.channel_value_satoshis,
 				                                              self.get_commitment_transaction_number_obscure_factor(),
-				                                              initial_commitment_tx.clone());
+				                                              initial_commitment_tx.clone(), self.counterparty_node_id);
 
 				channel_monitor.provide_latest_counterparty_commitment_tx_info(&counterparty_initial_commitment_tx, Vec::new(), self.cur_counterparty_commitment_transaction_number, self.counterparty_cur_commitment_point.unwrap(), logger);
 				channel_monitor
@@ -1627,7 +1627,7 @@ impl<ChanSigner: ChannelKeys> Channel<ChanSigner> {
 				                                              &counterparty_pubkeys.htlc_basepoint, &counterparty_pubkeys.delayed_payment_basepoint,
 				                                              self.counterparty_selected_contest_delay, funding_redeemscript.clone(), self.channel_value_satoshis,
 				                                              self.get_commitment_transaction_number_obscure_factor(),
-				                                              commitment_tx);
+				                                              commitment_tx, self.counterparty_node_id);
 
 				channel_monitor.provide_latest_counterparty_commitment_tx_info(&counterparty_initial_commitment_tx, Vec::new(), self.cur_counterparty_commitment_transaction_number, self.counterparty_cur_commitment_point.unwrap(), logger);
 
@@ -1950,7 +1950,8 @@ impl<ChanSigner: ChannelKeys> Channel<ChanSigner> {
 			Ok(res) => {
 				let mon_info = MonitorUpdateInfo {
 					funding_outpoint: self.funding_txo.unwrap(),
-					latest_monitor_update_id: self.latest_monitor_update_id
+					latest_monitor_update_id: self.latest_monitor_update_id,
+					counterparty_node_id: self.counterparty_node_id
 				};
 				Ok((res, mon_info))
 			},

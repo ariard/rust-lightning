@@ -695,6 +695,8 @@ pub struct ChannelMonitor<ChanSigner: ChannelKeys> {
 	// the full block_connected).
 	last_block_hash: BlockHash,
 	secp_ctx: Secp256k1<secp256k1::All>, //TODO: dedup this a bit...
+
+	counterparty_node_id: PublicKey
 }
 
 #[cfg(any(test, feature = "fuzztarget"))]
@@ -927,6 +929,7 @@ impl<ChanSigner: ChannelKeys + Writeable> ChannelMonitor<ChanSigner> {
 
 		self.lockdown_from_offchain.write(writer)?;
 		self.holder_tx_signed.write(writer)?;
+		self.counterparty_node_id.write(writer)?;
 
 		Ok(())
 	}
@@ -938,7 +941,8 @@ impl<ChanSigner: ChannelKeys> ChannelMonitor<ChanSigner> {
 			counterparty_htlc_base_key: &PublicKey, counterparty_delayed_payment_base_key: &PublicKey,
 			on_holder_tx_csv: u16, funding_redeemscript: Script, channel_value_satoshis: u64,
 			commitment_transaction_number_obscure_factor: u64,
-			initial_holder_commitment_tx: HolderCommitmentTransaction) -> ChannelMonitor<ChanSigner> {
+			initial_holder_commitment_tx: HolderCommitmentTransaction,
+			counterparty_node_id: PublicKey) -> ChannelMonitor<ChanSigner> {
 
 		assert!(commitment_transaction_number_obscure_factor <= (1 << 48));
 		let our_channel_close_key_hash = WPubkeyHash::hash(&shutdown_pubkey.serialize());
@@ -1009,6 +1013,8 @@ impl<ChanSigner: ChannelKeys> ChannelMonitor<ChanSigner> {
 
 			lockdown_from_offchain: false,
 			holder_tx_signed: false,
+
+			counterparty_node_id,
 
 			last_block_hash: Default::default(),
 			secp_ctx: Secp256k1::new(),
@@ -1755,7 +1761,8 @@ impl<ChanSigner: ChannelKeys> ChannelMonitor<ChanSigner> {
 							source: htlc_update.0,
 							monitor_info: MonitorUpdateInfo {
 								funding_outpoint: self.funding_info.0,
-								latest_monitor_update_id
+								latest_monitor_update_id,
+								counterparty_node_id: self.counterparty_node_id
 							}
 						}));
 					},
@@ -2029,7 +2036,8 @@ impl<ChanSigner: ChannelKeys> ChannelMonitor<ChanSigner> {
 							payment_hash,
 							monitor_info: MonitorUpdateInfo {
 								funding_outpoint: self.funding_info.0,
-								latest_monitor_update_id
+								latest_monitor_update_id,
+								counterparty_node_id: self.counterparty_node_id
 							}
 						}));
 					}
@@ -2046,7 +2054,8 @@ impl<ChanSigner: ChannelKeys> ChannelMonitor<ChanSigner> {
 							payment_hash,
 							monitor_info: MonitorUpdateInfo {
 								funding_outpoint: self.funding_info.0,
-								latest_monitor_update_id
+								latest_monitor_update_id,
+								counterparty_node_id: self.counterparty_node_id
 							}
 						}));
 					}
@@ -2379,6 +2388,7 @@ impl<ChanSigner: ChannelKeys + Readable> Readable for (BlockHash, ChannelMonitor
 
 		let lockdown_from_offchain = Readable::read(reader)?;
 		let holder_tx_signed = Readable::read(reader)?;
+		let counterparty_node_id = Readable::read(reader)?;
 
 		Ok((last_block_hash.clone(), ChannelMonitor {
 			latest_update_id,
@@ -2423,6 +2433,8 @@ impl<ChanSigner: ChannelKeys + Readable> Readable for (BlockHash, ChannelMonitor
 			lockdown_from_offchain,
 			holder_tx_signed,
 
+			counterparty_node_id,
+
 			last_block_hash,
 			secp_ctx: Secp256k1::new(),
 		}))
@@ -2459,6 +2471,7 @@ mod tests {
 		let logger = Arc::new(TestLogger::new());
 
 		let dummy_key = PublicKey::from_secret_key(&secp_ctx, &SecretKey::from_slice(&[42; 32]).unwrap());
+		let dummy_counterparty_nodeid = PublicKey::from_secret_key(&secp_ctx, &SecretKey::from_slice(&[43; 32]).unwrap());
 		let dummy_tx = Transaction { version: 0, lock_time: 0, input: Vec::new(), output: Vec::new() };
 
 		let mut preimages = Vec::new();
@@ -2524,7 +2537,7 @@ mod tests {
 			(OutPoint { txid: Txid::from_slice(&[43; 32]).unwrap(), index: 0 }, Script::new()),
 			&PublicKey::from_secret_key(&secp_ctx, &SecretKey::from_slice(&[44; 32]).unwrap()),
 			&PublicKey::from_secret_key(&secp_ctx, &SecretKey::from_slice(&[45; 32]).unwrap()),
-			10, Script::new(), 46, 0, HolderCommitmentTransaction::dummy());
+			10, Script::new(), 46, 0, HolderCommitmentTransaction::dummy(), dummy_counterparty_nodeid);
 
 		monitor.provide_latest_holder_commitment_tx_info(HolderCommitmentTransaction::dummy(), preimages_to_holder_htlcs!(preimages[0..10])).unwrap();
 		monitor.provide_latest_counterparty_commitment_tx_info(&dummy_tx, preimages_slice_to_htlc_outputs!(preimages[5..15]), 281474976710655, dummy_key, &logger);

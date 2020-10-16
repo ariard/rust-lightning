@@ -707,9 +707,10 @@ macro_rules! maybe_break_monitor_err {
 #[derive(Clone, PartialEq)]
 pub(crate) struct MonitorUpdateInfo {
 	pub(crate) funding_outpoint: OutPoint,
-	pub(crate) latest_monitor_update_id: u64
+	pub(crate) latest_monitor_update_id: u64,
+	pub(crate) counterparty_node_id: PublicKey
 }
-impl_writeable!(MonitorUpdateInfo, 0, { funding_outpoint, latest_monitor_update_id });
+impl_writeable!(MonitorUpdateInfo, 0, { funding_outpoint, latest_monitor_update_id, counterparty_node_id });
 
 impl<ChanSigner: ChannelKeys, M: Deref, T: Deref, K: Deref, F: Deref, L: Deref> ChannelManager<ChanSigner, M, T, K, F, L>
 	where M::Target: chain::Watch<Keys=ChanSigner>,
@@ -2157,10 +2158,17 @@ impl<ChanSigner: ChannelKeys, M: Deref, T: Deref, K: Deref, F: Deref, L: Deref> 
 								payment_preimage: payment_preimage.clone(),
 							}],
 						};
-						if let Err(_) = self.chain_monitor.update_channel(monitor_update_info.funding_outpoint, preimage_update) {
-							// TODO(val): figure out what to do here
+						match self.chain_monitor.update_channel(monitor_update_info.funding_outpoint, preimage_update) {
+							Err(ChannelMonitorUpdateErr::PermanentFailure) => {
+								let err_msg = MsgHandleErrInternal::send_err_msg_no_close("Failed to update channel with preimage".to_owned(), monitor_update_info.funding_outpoint.to_channel_id());
+								Err((monitor_update_info.counterparty_node_id, err_msg))
+							}
+							Err(ChannelMonitorUpdateErr::TemporaryFailure) => {
+								let err_msg = MsgHandleErrInternal::from_chan_no_close(ChannelError::Ignore("Failed to update channel with preimage".to_owned()), monitor_update_info.funding_outpoint.to_channel_id());
+								Err((monitor_update_info.counterparty_node_id, err_msg))
+							}
+							Ok(()) => Ok(())
 						}
-						Ok(())
 					},
 					Err(Some(res)) => Err(res),
 				} {
