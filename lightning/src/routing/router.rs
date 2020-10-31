@@ -166,7 +166,7 @@ struct DummyDirectionalChannelInfo {
 // It's useful to keep track of the hops associated with the fees required to use them,
 // so that we can choose cheaper paths (as per Dijkstra's algorithm).
 /// Fee values should be updated only in the context of the whole path, see update_value_and_recompute_fees.
-/// These fee values are useful to choose hops as we traverse the graph dest to source of the payment.
+/// These fee values are useful to choose hops as we traverse the graph "payee-to-payer".
 #[derive(Clone)]
 struct PaymentHop {
 	route_hop: RouteHop,
@@ -268,7 +268,7 @@ fn compute_fees(amount_msat: u64, channel_fees: RoutingFees) -> u64 {
 	}
 }
 
-/// Gets a route from us to the given target node.
+/// Gets a route from us (payer) to the given target node (payee).
 ///
 /// Extra routing hops between known nodes and the target will be used if they are included in
 /// last_hops.
@@ -284,11 +284,11 @@ fn compute_fees(amount_msat: u64, channel_fees: RoutingFees) -> u64 {
 /// The fees on channels from us to next-hops are ignored (as they are assumed to all be
 /// equal), however the enabled/disabled bit on such channels as well as the htlc_minimum_msat
 /// *is* checked as they may change based on the receiving node.
-pub fn get_route<L: Deref>(our_node_id: &PublicKey, network: &NetworkGraph, target: &PublicKey, first_hops: Option<&[&ChannelDetails]>,
+pub fn get_route<L: Deref>(our_node_id: &PublicKey, network: &NetworkGraph, payee: &PublicKey, first_hops: Option<&[&ChannelDetails]>,
 	last_hops: &[&RouteHint], final_value_msat: u64, final_cltv: u32, logger: L) -> Result<Route, LightningError> where L::Target: Logger {
 	// TODO: Obviously *only* using total fee cost sucks. We should consider weighting by
 	// uptime/success in using a node in the past.
-	if *target == *our_node_id {
+	if *payee == *our_node_id {
 		return Err(LightningError{err: "Cannot generate a route to ourselves".to_owned(), action: ErrorAction::IgnoreError});
 	}
 
@@ -298,7 +298,7 @@ pub fn get_route<L: Deref>(our_node_id: &PublicKey, network: &NetworkGraph, targ
 
 	// The general routing idea is the following:
 	// 1. Fill first/last hops communicated by the caller.
-	// 2. Attempt to construct a path from source to dest for transferring any ~sufficient (described later) value.
+	// 2. Attempt to construct a path from payer to payee for transferring any ~sufficient (described later) value.
 	//    If succeed, remember which channels were used and how much liquidity they have available,
 	//    so that future paths don't rely on the same liquidity.
 	// 3. Prooceed to the next step if:
@@ -314,7 +314,7 @@ pub fn get_route<L: Deref>(our_node_id: &PublicKey, network: &NetworkGraph, targ
 	// 8. Choose the best route by the lowest total fee.
 
 	// As for the actual search algorithm,
-	// we do a dest-to-source Dijkstra's sorting by each node's distance from the destination
+	// we do a payee-to-payer Dijkstra's sorting by each node's distance from the payee
 	// plus the minimum per-HTLC fee to get from it to another node (aka "shitty A*").
 	// TODO: There are a few tweaks we could do, including possibly pre-calculating more stuff
 	// to use as the A* heuristic beyond just the cost to get one node further than the current
@@ -340,13 +340,13 @@ pub fn get_route<L: Deref>(our_node_id: &PublicKey, network: &NetworkGraph, targ
 	let recommended_value_msat = final_value_msat * ROUTE_CAPACITY_PROVISION_FACTOR as u64;
 
 	// Step (1).
-	// Prepare the data we'll use for dest-to-source search by inserting first hops suggested by the caller as targets.
-	// Our search will then attempt to reach them while traversing from the dest node.
+	// Prepare the data we'll use for payee-to-payer search by inserting first hops suggested by the caller as targets.
+	// Our search will then attempt to reach them while traversing from the payee node.
 	let mut first_hop_targets = HashMap::with_capacity(if first_hops.is_some() { first_hops.as_ref().unwrap().len() } else { 0 });
 	if let Some(hops) = first_hops {
 		for chan in hops {
 			let short_channel_id = chan.short_channel_id.expect("first_hops should be filled in with usable channels, not pending ones");
-			if chan.remote_network_id == *target {
+			if chan.remote_network_id == *payee {
 				return Ok(Route {
 					paths: vec![vec![RouteHop {
 						pubkey: chan.remote_network_id,
@@ -445,7 +445,7 @@ pub fn get_route<L: Deref>(our_node_id: &PublicKey, network: &NetworkGraph, targ
 			if has_sufficient_liquidity && can_cover_following_hops && amount_to_transfer_over_msat >= $directional_info.htlc_minimum_msat {
 				let hm_entry = dist.entry(&$src_node_id);
 				let old_entry = hm_entry.or_insert_with(|| {
-					// If there was previously no known way to access the source node (recall it goes dest-to-source) of $chan_id,
+					// If there was previously no known way to access the source node (recall it goes payee-to-payer) of $chan_id,
 					// first add a semi-dummy record just to compute the fees to reach the source node.
 					// This will affect our decision on selecting $chan_id as a way to reach the $dest_node_id.
 					let node = network.get_nodes().get(&$src_node_id).unwrap();
@@ -518,7 +518,7 @@ pub fn get_route<L: Deref>(our_node_id: &PublicKey, network: &NetworkGraph, targ
 
 	// Find ways (channels with destimation) to reach a given node and store them
 	// in the corresponding data structures (routing graph etc).
-	// $fee_to_target_msat represents how much it costs to reach to this node from payment destination,
+	// $fee_to_target_msat represents how much it costs to reach to this node from the payee,
 	// or, in other words, how much will be paid in fees after this node (to the best of our knowledge).
 	// This data can later be helpful to optimize routing (pay lower fees).
 	macro_rules! add_entries_to_cheapest_to_target_node {
@@ -574,11 +574,11 @@ pub fn get_route<L: Deref>(our_node_id: &PublicKey, network: &NetworkGraph, targ
 		targets.clear();
 		dist.clear();
 
-		// Add the payment receiver node as a target, so that the dest-to-source search algorithm knows what to start with.
-		match network.get_nodes().get(target) {
+		// Add the payee as a target, so that the payee-to-payer search algorithm knows what to start with.
+		match network.get_nodes().get(payee) {
 			None => {},
 			Some(node) => {
-				add_entries_to_cheapest_to_target_node!(node, target, 0);
+				add_entries_to_cheapest_to_target_node!(node, payee, 0);
 			},
 		}
 
@@ -600,7 +600,7 @@ pub fn get_route<L: Deref>(our_node_id: &PublicKey, network: &NetworkGraph, targ
 					}
 					// BOLT 11 doesn't allow inclusion of features for the last hop hints, which
 					// really sucks, cause we're gonna need that eventually.
-					add_entry!(hop.short_channel_id, hop.src_node_id, target, hop, None::<u64>, ChannelFeatures::empty(), 0);
+					add_entry!(hop.short_channel_id, hop.src_node_id, payee, hop, None::<u64>, ChannelFeatures::empty(), 0);
 				}
 			}
 		}
@@ -611,7 +611,7 @@ pub fn get_route<L: Deref>(our_node_id: &PublicKey, network: &NetworkGraph, targ
 		// Step (2).
 		'path_construction: while let Some(RouteGraphNode { pubkey, lowest_fee_to_node, .. }) = targets.pop() {
 
-			// Since we're going dest-to-source, hitting our node as a target means that we should stop traversing the
+			// Since we're going payee-to-payer, hitting our node as a target means that we should stop traversing the
 			// graph and arrange the path out of what we found.
 			if pubkey == *our_node_id {
 				let mut new_entry = dist.remove(&our_node_id).unwrap();
@@ -634,7 +634,7 @@ pub fn get_route<L: Deref>(our_node_id: &PublicKey, network: &NetworkGraph, targ
 						// hop, if the last hop was provided via a BOLT 11 invoice (though we
 						// should be able to extend it further as BOLT 11 does have feature
 						// flags for the last hop node itself).
-						assert!(ordered_hops.last().unwrap().route_hop.pubkey == *target);
+						assert!(ordered_hops.last().unwrap().route_hop.pubkey == *payee);
 					}
 
 					if new_entry.available_liquidity_msat > new_entry.following_hops_fees_msat {
@@ -646,7 +646,7 @@ pub fn get_route<L: Deref>(our_node_id: &PublicKey, network: &NetworkGraph, targ
 						path_bottleneck_msat = cmp::min(path_bottleneck_msat, new_entry.available_liquidity_msat / 10);
 					}
 
-					if ordered_hops.last().unwrap().route_hop.pubkey == *target {
+					if ordered_hops.last().unwrap().route_hop.pubkey == *payee {
 						break;
 					}
 
@@ -693,7 +693,7 @@ pub fn get_route<L: Deref>(our_node_id: &PublicKey, network: &NetworkGraph, targ
 			}
 
 			// Otherwise, since the current target node is not us, keep "unrolling" the payment graph from
-			// dest to source by finding a way to reach the current target from the source side.
+			// payee to payer by finding a way to reach the current target from the payer side.
 			match network.get_nodes().get(&pubkey) {
 				None => {},
 				Some(node) => {
