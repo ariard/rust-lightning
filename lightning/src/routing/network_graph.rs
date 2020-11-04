@@ -282,6 +282,23 @@ impl fmt::Display for DirectionalChannelInfo {
 	}
 }
 
+impl Default for DirectionalChannelInfo {
+	fn default() -> Self {
+		DirectionalChannelInfo {
+			last_update: 0,
+			enabled: false,
+			cltv_expiry_delta: 0,
+			htlc_minimum_msat: 0,
+			htlc_maximum_msat: None,
+			fees: RoutingFees {
+				base_msat: 0,
+				proportional_millionths: 0,
+			},
+			last_update_message: None,
+		}
+	}
+}
+
 impl_writeable!(DirectionalChannelInfo, 0, {
 	last_update,
 	enabled,

@@ -17,7 +17,7 @@ use bitcoin::secp256k1::key::PublicKey;
 use ln::channelmanager::ChannelDetails;
 use ln::features::{ChannelFeatures, NodeFeatures};
 use ln::msgs::{DecodeError, ErrorAction, LightningError, MAX_VALUE_MSAT};
-use routing::network_graph::{NetworkGraph, RoutingFees};
+use routing::network_graph::{NetworkGraph, RoutingFees, DirectionalChannelInfo, NodeInfo};
 use util::ser::{Writeable, Readable};
 use util::logger::Logger;
 
@@ -156,13 +156,6 @@ impl cmp::PartialOrd for RouteGraphNode {
 	}
 }
 
-struct DummyDirectionalChannelInfo {
-	cltv_expiry_delta: u32,
-	htlc_minimum_msat: u64,
-	htlc_maximum_msat: Option<u64>,
-	fees: RoutingFees,
-}
-
 // It's useful to keep track of the hops associated with the fees required to use them,
 // so that we can choose cheaper paths (as per Dijkstra's algorithm).
 /// Fee values should be updated only in the context of the whole path, see update_value_and_recompute_fees.
@@ -268,6 +261,220 @@ fn compute_fees(amount_msat: u64, channel_fees: RoutingFees) -> u64 {
 	}
 }
 
+/// Placeholder for routing state during a collection of payment paths construction session.
+struct RoutingState {
+	targeted_edges: BinaryHeap<RouteGraphNode>,
+	weighted_vertices: HashMap<PublicKey, PaymentHop>,
+	payer_node_id: PublicKey,
+	/// We don't want multiple paths (as per MPP) share liquidity of the same channels.
+	///
+	/// This map allows paths to be aware of the channel use by other paths in the same call.
+	/// This would help to make a better path finding decisions and not "overbook" channels.
+	/// It is currently unaware of the directions. But if we moved 1 BTC in one direction and
+	/// 1 BTC in the opposite direction, should they cancel out? Probably not, because
+	/// in the worst-case order of HTLC forwarding, channel liquidity can be overflown.
+	/// TODO: we could let a caller specify this. Definitely useful when considering our own channels.
+	bookkeeped_channels_liquidity_available_msat: HashMap<u64, u64>,
+	recommended_value_msat: u64,
+	/// Keeping track of how much value we already collected across other paths. Helps to decide:
+	/// - how much a new path should be transferring (upper bound);
+	/// - whether a channel should be disregarded because it's available liquidity is too small comparing
+	///   to how much more we need to collect;
+	/// - when we want to stop looking for new paths.
+	already_collected_value_msat: u64
+}
+
+impl RoutingState {
+	fn new(graph_size: usize, payer_node_id: PublicKey, recommended_value_msat: u64) -> Self {
+		RoutingState {
+			targeted_edges: BinaryHeap::new(), //TODO: Do we care about switching to eg Fibbonaci heap?
+			weighted_vertices: HashMap::with_capacity(graph_size),
+			payer_node_id,
+			bookkeeped_channels_liquidity_available_msat: HashMap::new(),
+			recommended_value_msat,
+			already_collected_value_msat: 0,
+		}
+	}
+
+	/// Adds weighted vertice as identified by scid which goes from source node to destination
+	/// node with fees described in channel details.
+	///
+	/// `following_hops_fees_msat` represents the fees paid for using all the channel *after*
+	/// this one since that value has to be transferred over this channel.
+	/// TODO: direction of *after*
+	fn add_vertice(&mut self, scid: u64, src_node_id: &PublicKey, dest_node_id: &PublicKey, directional_info: &DirectionalChannelInfo, capacity_sats: Option<u64>, features: ChannelFeatures, following_hops_fees_msat: u64, network: &NetworkGraph) {
+
+		// Assign a liquidity to the channel either from bookkeeped previous routing usage
+		// or from known channel relay policy's `htlc_maximum_msat`.
+		let available_liquidity_msat = self.bookkeeped_channels_liquidity_available_msat.entry(scid.clone()).or_insert_with(|| {
+			let mut initial_liquidity_available_msat = None;
+			if let Some(capacity_sats) = capacity_sats {
+				initial_liquidity_available_msat = Some(capacity_sats * 1000);
+			}
+
+			if let Some(htlc_maximum_msat) = directional_info.htlc_maximum_msat {
+				if let Some(available_msat) = initial_liquidity_available_msat {
+					initial_liquidity_available_msat = Some(cmp::min(available_msat, htlc_maximum_msat));
+				} else {
+					initial_liquidity_available_msat = Some(htlc_maximum_msat);
+				}
+			}
+
+			match initial_liquidity_available_msat {
+				Some(available_msat) => available_msat,
+				// We assume channels with unknown balance have a capacity of 0.0001 BTC (or 10_000 sats).
+				None => 10_000 * 1000
+			}
+		});
+
+		// Routing Fragmentation Mitigation heuristic:
+		//
+		// Routing fragmentation across many payment paths increases the overall routing
+		// fees as you have irreducible routing fees per-link used (`fee_base_msat`).
+		// Taking too many paths also smaller paths also increases the chance of payment failure.
+		// Thus to avoid this effect, we require from our collected links to provide
+		// at least a minimal liquidity contribution to the recommended value yet-to-be-fulfilled.
+		//
+		// This requirement is currently 5% of the already-collected value. This means as
+		// we successfully advance in our collection, the absolute liquidity contribution is lowered,
+		// thus increasing the number of potential channels to be selected.
+
+		// Update the absolute liquidity left to collect from previously built paths.
+		let value_left_to_collect_msat = self.recommended_value_msat - self.already_collected_value_msat;
+		// Derive the minimal liquidity contribution with a ratio of 20 (5%).
+		let minimal_liquidity_contribution_msat: u64 = value_left_to_collect_msat / 20;
+		// Verify the liquidity offered by this channel complies to the minimal contribution.
+		let has_sufficient_liquidity = *available_liquidity_msat >= minimal_liquidity_contribution_msat;
+
+		// It is tricky to compare available liquidity to $following_hops_fees_msat here
+		// to see if this channel is capable of paying for the use of the following channels.
+		// It may be misleading because we might later choose to reduce the value transferred
+		// over these channels, and the channel which was insufficient might become sufficient.
+		// Worst case: we drop a good channel here because it can't cover the high following fees
+		// caused by one expensive channel, but then this channel could have been used if the amount being
+		// transferred over this path is lower.
+		// We do this for now, but this check is a subject for removal.
+		let can_cover_following_hops = *available_liquidity_msat > following_hops_fees_msat;
+
+		// Includes paying fees for the use of the following channels.
+		let amount_to_transfer_over_msat: u64 = cmp::min(*available_liquidity_msat, value_left_to_collect_msat);
+
+		//TODO: Explore simply adding fee to hit htlc_minimum_msat
+		if has_sufficient_liquidity && can_cover_following_hops && amount_to_transfer_over_msat >= directional_info.htlc_minimum_msat {
+			let hm_entry = self.weighted_vertices.entry(*src_node_id);
+			let old_entry = hm_entry.or_insert_with(|| {
+				// If there was previously no known way to access the source node (recall it goes payee-to-payer) of `scid`,
+				// first add a semi-dummy record just to compute the fees to reach the source node.
+				// This will affect our decision on selecting `scid` as a way to reach the `dest_node_id`.
+				let node = network.get_nodes().get(&src_node_id).unwrap();
+				let mut fee_base_msat = u32::max_value();
+				let mut fee_proportional_millionths = u32::max_value();
+				if let Some(fees) = node.lowest_inbound_channel_fees {
+					fee_base_msat = fees.base_msat;
+					fee_proportional_millionths = fees.proportional_millionths;
+				};
+				PaymentHop {
+					route_hop: RouteHop {
+						pubkey: dest_node_id.clone(),
+						node_features: NodeFeatures::empty(),
+						short_channel_id: 0,
+						channel_features: features.clone(),
+						fee_msat: 0,
+						cltv_expiry_delta: 0,
+					},
+					available_liquidity_msat: 0,
+					src_lowest_inbound_fees: RoutingFees {
+						base_msat: fee_base_msat,
+						proportional_millionths: fee_proportional_millionths,
+					},
+					channel_fees: directional_info.fees,
+					following_hops_fees_msat: u64::max_value(),
+					hop_use_fee_msat: u64::max_value(),
+					prev_hop_use_estimate_fee_msat: u64::max_value(),
+				}
+			});
+
+			let hop_use_fee_msat = compute_fees(amount_to_transfer_over_msat, directional_info.fees);
+			let mut prev_hop_use_estimate_fee_msat = 0;
+			let mut total_fee_msat = following_hops_fees_msat;
+			if *src_node_id != self.payer_node_id {
+				// Ignore hop_use_fee_msat for channel-from-us as we assume all channels-from-us
+				// will have the same effective-fee
+				total_fee_msat += hop_use_fee_msat;
+				prev_hop_use_estimate_fee_msat = compute_fees(total_fee_msat + amount_to_transfer_over_msat, old_entry.src_lowest_inbound_fees);
+				total_fee_msat += prev_hop_use_estimate_fee_msat;
+			}
+
+			let new_graph_node = RouteGraphNode {
+				pubkey: *src_node_id,
+				lowest_fee_to_peer_through_node: total_fee_msat,
+				lowest_fee_to_node: following_hops_fees_msat as u64 + hop_use_fee_msat,
+			};
+			// Update the way of reaching `dest_node_id` with the given `scid`, if this way is cheaper
+			// than the already known (considering the cost to "reach" this channel from the route destination,
+			// the cost of using this channel, and the cost of routing to the source node of this channel).
+			if old_entry.get_fee_weight_msat() > total_fee_msat {
+				self.targeted_edges.push(new_graph_node);
+				old_entry.following_hops_fees_msat = following_hops_fees_msat;
+				old_entry.hop_use_fee_msat = hop_use_fee_msat;
+				old_entry.prev_hop_use_estimate_fee_msat = prev_hop_use_estimate_fee_msat;
+				old_entry.route_hop = RouteHop {
+					pubkey: dest_node_id.clone(),
+					node_features: NodeFeatures::empty(),
+					short_channel_id: scid.clone(),
+					channel_features: features.clone(),
+					fee_msat: 0, // This value will be later filled with hop_use_fee_msat of the following channel
+					cltv_expiry_delta: directional_info.cltv_expiry_delta as u32,
+				};
+				old_entry.available_liquidity_msat = available_liquidity_msat.clone();
+				old_entry.channel_fees = directional_info.fees;
+			}
+		}
+	}
+
+	/// Find ways (channels with destimation) to reach a given node and store them
+	/// in the corresponding data structures (routing graph etc).
+	///
+	/// `fee_to_target_msat` represents how much it costs to reach to this node from the payee,
+	/// or, in other words, how much will be paid in fees after this node (to the best of our knowledge).
+	/// This data can later be helpful to optimize routing (pay lower fees).
+	fn select_weighted_vertice_to_target_edge(&mut self, node: &NodeInfo, node_id: &PublicKey, fee_to_target_msat: u64, first_hops: Option<&[&ChannelDetails]>, network: &NetworkGraph) {
+
+		let features;
+		if let Some(node_info) = node.announcement_info.as_ref() {
+			features = node_info.features.clone();
+		} else {
+			features = NodeFeatures::empty();
+		}
+
+		if !features.requires_unknown_bits() {
+			for chan_id in node.channels.iter() {
+				let chan = network.get_channels().get(chan_id).unwrap();
+				if !chan.features.requires_unknown_bits() {
+					if chan.node_one == *node_id {
+						// ie `node` is one, ie next hop in A* is two, via the two_to_one channel
+						if first_hops.is_none() || chan.node_two != self.payer_node_id {
+							if let Some(two_to_one) = chan.two_to_one.as_ref() {
+								if two_to_one.enabled {
+									self.add_vertice(*chan_id, &chan.node_two, &chan.node_one, two_to_one, chan.capacity_sats, chan.features.clone(), fee_to_target_msat, network);
+								}
+							}
+						}
+					} else {
+						if first_hops.is_none() || chan.node_one != self.payer_node_id {
+							if let Some(one_to_two) = chan.one_to_two.as_ref() {
+								if one_to_two.enabled {
+									self.add_vertice(*chan_id, &chan.node_one, &chan.node_two, one_to_two, chan.capacity_sats, chan.features.clone(), fee_to_target_msat, network);
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
 /// Gets a route from us (payer) to the given target node (payee).
 ///
 /// Extra routing hops between known nodes and the target will be used if they are included in
@@ -320,24 +527,13 @@ pub fn get_route<L: Deref>(our_node_id: &PublicKey, network: &NetworkGraph, paye
 	// to use as the A* heuristic beyond just the cost to get one node further than the current
 	// one.
 
-	let dummy_directional_info = DummyDirectionalChannelInfo { // used for first_hops routes
-		cltv_expiry_delta: 0,
-		htlc_minimum_msat: 0,
-		htlc_maximum_msat: None,
-		fees: RoutingFees {
-			base_msat: 0,
-			proportional_millionths: 0,
-		}
-	};
-
-	let mut targets = BinaryHeap::new(); //TODO: Do we care about switching to eg Fibbonaci heap?
-	let mut dist = HashMap::with_capacity(network.get_nodes().len());
-
 	// When arranging a route, we select multiple paths so that we can make a multi-path payment.
 	// Don't stop searching for paths when we think they're sufficient to transfer a given value aggregately.
 	// Search for higher value, so that we collect many more paths, and then select the best combination among them.
 	const ROUTE_CAPACITY_PROVISION_FACTOR: u64 = 4;
 	let recommended_value_msat = final_value_msat * ROUTE_CAPACITY_PROVISION_FACTOR as u64;
+
+	let mut routing_state = RoutingState::new(network.get_nodes().len(), *our_node_id, recommended_value_msat);
 
 	// Step (1).
 	// Prepare the data we'll use for payee-to-payer search by inserting first hops suggested by the caller as targets.
@@ -365,220 +561,25 @@ pub fn get_route<L: Deref>(our_node_id: &PublicKey, network: &NetworkGraph, paye
 		}
 	}
 
-	// We don't want multiple paths (as per MPP) share liquidity of the same channels.
-	// This map allows paths to be aware of the channel use by other paths in the same call.
-	// This would help to make a better path finding decisions and not "overbook" channels.
-	// It is currently unaware of the directions. But if we moved 1 BTC in one direction and
-	// 1 BTC in the opposite direction, should they cancel out? Probably not, because
-	// in the worst-case order of HTLC forwarding, channel liquidity can be overflown.
-	// TODO: we could let a caller specify this. Definitely useful when considering our own channels.
-	let mut bookkeeped_channels_liquidity_available_msat = HashMap::new();
-
-	// Keeping track of how much value we already collected across other paths. Helps to decide:
-	// - how much a new path should be transferring (upper bound);
-	// - whether a channel should be disregarded because it's available liquidity is too small comparing
-	//   to how much more we need to collect;
-	// - when we want to stop looking for new paths.
-	let mut already_collected_value_msat = 0;
-
-	macro_rules! add_entry {
-		// Adds entry which goes from $src_node_id to $dest_node_id
-		// over the channel with id $chan_id with fees described in
-		// $directional_info.
-		// $following_hops_fees_msat represents the fees paid for using all the channel *after* this one,
-		// since that value has to be transferred over this channel.
-		( $chan_id: expr, $src_node_id: expr, $dest_node_id: expr, $directional_info: expr, $capacity_sats: expr, $chan_features: expr, $following_hops_fees_msat: expr ) => {
-			let available_liquidity_msat = bookkeeped_channels_liquidity_available_msat.entry($chan_id.clone()).or_insert_with(|| {
-				let mut initial_liquidity_available_msat = None;
-				if let Some(capacity_sats) = $capacity_sats {
-					initial_liquidity_available_msat = Some(capacity_sats * 1000);
-				}
-
-				if let Some(htlc_maximum_msat) = $directional_info.htlc_maximum_msat {
-					if let Some(available_msat) = initial_liquidity_available_msat {
-						initial_liquidity_available_msat = Some(cmp::min(available_msat, htlc_maximum_msat));
-					} else {
-						initial_liquidity_available_msat = Some(htlc_maximum_msat);
-					}
-				}
-
-				match initial_liquidity_available_msat {
-					Some(available_msat) => available_msat,
-					// We assume channels with unknown balance have a capacity of 0.0001 BTC (or 10_000 sats).
-					None => 10_000 * 1000
-				}
-			});
-
-			// Routing Fragmentation Mitigation heuristic:
-			//
-			// Routing fragmentation across many payment paths increases the overall routing
-			// fees as you have irreducible routing fees per-link used (`fee_base_msat`).
-			// Taking too many paths also smaller paths also increases the chance of payment failure.
-			// Thus to avoid this effect, we require from our collected links to provide
-			// at least a minimal liquidity contribution to the recommended value yet-to-be-fulfilled.
-			//
-			// This requirement is currently 5% of the already-collected value. This means as
-			// we successfully advance in our collection, the absolute liquidity contribution is lowered,
-			// thus increasing the number of potential channels to be selected.
-
-			// Update the absolute liquidity left to collect from previously built paths.
-			let value_left_to_collect_msat = recommended_value_msat - already_collected_value_msat;
-			// Derive the minimal liquidity contribution with a ratio of 20 (5%).
-			let minimal_liquidity_contribution_msat: u64 = value_left_to_collect_msat / 20;
-			// Verify the liquidity offered by this channel complies to the minimal contribution.
-			let has_sufficient_liquidity = *available_liquidity_msat >= minimal_liquidity_contribution_msat;
-
-			// It is tricky to compare available liquidity to $following_hops_fees_msat here
-			// to see if this channel is capable of paying for the use of the following channels.
-			// It may be misleading because we might later choose to reduce the value transferred
-			// over these channels, and the channel which was insufficient might become sufficient.
-			// Worst case: we drop a good channel here because it can't cover the high following fees
-			// caused by one expensive channel, but then this channel could have been used if the amount being
-			// transferred over this path is lower.
-			// We do this for now, but this check is a subject for removal.
-			let can_cover_following_hops = *available_liquidity_msat > $following_hops_fees_msat;
-
-			// Includes paying fees for the use of the following channels.
-			let amount_to_transfer_over_msat: u64 = cmp::min(*available_liquidity_msat, value_left_to_collect_msat);
-
-			//TODO: Explore simply adding fee to hit htlc_minimum_msat
-			if has_sufficient_liquidity && can_cover_following_hops && amount_to_transfer_over_msat >= $directional_info.htlc_minimum_msat {
-				let hm_entry = dist.entry(&$src_node_id);
-				let old_entry = hm_entry.or_insert_with(|| {
-					// If there was previously no known way to access the source node (recall it goes payee-to-payer) of $chan_id,
-					// first add a semi-dummy record just to compute the fees to reach the source node.
-					// This will affect our decision on selecting $chan_id as a way to reach the $dest_node_id.
-					let node = network.get_nodes().get(&$src_node_id).unwrap();
-					let mut fee_base_msat = u32::max_value();
-					let mut fee_proportional_millionths = u32::max_value();
-					if let Some(fees) = node.lowest_inbound_channel_fees {
-						fee_base_msat = fees.base_msat;
-						fee_proportional_millionths = fees.proportional_millionths;
-					};
-					PaymentHop {
-						route_hop: RouteHop {
-							pubkey: $dest_node_id.clone(),
-							node_features: NodeFeatures::empty(),
-							short_channel_id: 0,
-							channel_features: $chan_features.clone(),
-							fee_msat: 0,
-							cltv_expiry_delta: 0,
-						},
-						available_liquidity_msat: 0,
-						src_lowest_inbound_fees: RoutingFees {
-							base_msat: fee_base_msat,
-							proportional_millionths: fee_proportional_millionths,
-						},
-						channel_fees: $directional_info.fees,
-						following_hops_fees_msat: u64::max_value(),
-						hop_use_fee_msat: u64::max_value(),
-						prev_hop_use_estimate_fee_msat: u64::max_value(),
-					}
-				});
-
-				let hop_use_fee_msat = compute_fees(amount_to_transfer_over_msat, $directional_info.fees);
-				let mut prev_hop_use_estimate_fee_msat = 0;
-				let mut total_fee_msat = $following_hops_fees_msat;
-				if $src_node_id != *our_node_id {
-					// Ignore hop_use_fee_msat for channel-from-us as we assume all channels-from-us
-					// will have the same effective-fee
-					total_fee_msat += hop_use_fee_msat;
-					prev_hop_use_estimate_fee_msat = compute_fees(total_fee_msat + amount_to_transfer_over_msat, old_entry.src_lowest_inbound_fees);
-					total_fee_msat += prev_hop_use_estimate_fee_msat;
-				}
-
-				let new_graph_node = RouteGraphNode {
-					pubkey: $src_node_id,
-					lowest_fee_to_peer_through_node: total_fee_msat,
-					lowest_fee_to_node: $following_hops_fees_msat as u64 + hop_use_fee_msat,
-				};
-				// Update the way of reaching $dest_node_id with the given $chan_id, if this way is cheaper
-				// than the already known (considering the cost to "reach" this channel from the route destination,
-				// the cost of using this channel, and the cost of routing to the source node of this channel).
-				if old_entry.get_fee_weight_msat() > total_fee_msat {
-					targets.push(new_graph_node);
-					old_entry.following_hops_fees_msat = $following_hops_fees_msat;
-					old_entry.hop_use_fee_msat = hop_use_fee_msat;
-					old_entry.prev_hop_use_estimate_fee_msat = prev_hop_use_estimate_fee_msat;
-					old_entry.route_hop = RouteHop {
-						pubkey: $dest_node_id.clone(),
-						node_features: NodeFeatures::empty(),
-						short_channel_id: $chan_id.clone(),
-						channel_features: $chan_features.clone(),
-						fee_msat: 0, // This value will be later filled with hop_use_fee_msat of the following channel
-						cltv_expiry_delta: $directional_info.cltv_expiry_delta as u32,
-					};
-					old_entry.available_liquidity_msat = available_liquidity_msat.clone();
-					old_entry.channel_fees = $directional_info.fees;
-				}
-			}
-		};
-		
-	}
-
-	// Find ways (channels with destimation) to reach a given node and store them
-	// in the corresponding data structures (routing graph etc).
-	// $fee_to_target_msat represents how much it costs to reach to this node from the payee,
-	// or, in other words, how much will be paid in fees after this node (to the best of our knowledge).
-	// This data can later be helpful to optimize routing (pay lower fees).
-	macro_rules! add_entries_to_cheapest_to_target_node {
-		( $node: expr, $node_id: expr, $fee_to_target_msat: expr ) => {
-			if first_hops.is_some() {
-				if let Some(&(ref first_hop, ref features)) = first_hop_targets.get(&$node_id) {
-					add_entry!(first_hop, *our_node_id, $node_id, dummy_directional_info, None::<u64>, features.to_context(), $fee_to_target_msat);
-				}
-			}
-
-			let features;
-			if let Some(node_info) = $node.announcement_info.as_ref() {
-				features = node_info.features.clone();
-			} else {
-				features = NodeFeatures::empty();
-			}
-
-			if !features.requires_unknown_bits() {
-				for chan_id in $node.channels.iter() {
-					let chan = network.get_channels().get(chan_id).unwrap();
-					if !chan.features.requires_unknown_bits() {
-						if chan.node_one == *$node_id {
-							// ie $node is one, ie next hop in A* is two, via the two_to_one channel
-							if first_hops.is_none() || chan.node_two != *our_node_id {
-								if let Some(two_to_one) = chan.two_to_one.as_ref() {
-									if two_to_one.enabled {
-										add_entry!(chan_id, chan.node_two, chan.node_one, two_to_one, chan.capacity_sats, chan.features, $fee_to_target_msat);
-									}
-								}
-							}
-						} else {
-							if first_hops.is_none() || chan.node_one != *our_node_id {
-								if let Some(one_to_two) = chan.one_to_two.as_ref() {
-									if one_to_two.enabled {
-										add_entry!(chan_id, chan.node_one, chan.node_two, one_to_two, chan.capacity_sats, chan.features, $fee_to_target_msat);
-									}
-								}
-
-							}
-						}
-					}
-				}
-			}
-		};
-	}
-
 	let mut payment_paths = Vec::<PaymentPath>::new();
 
 	// TODO: diversify by nodes (so that all paths aren't doomed if one node is offline).
 	'paths_collection: loop {
 		// For every new path, start from scratch, except bookkeeped_channels_liquidity_available_msat,
 		// which will improve the further iterations of path finding. Also don't erase first_hop_targets.
-		targets.clear();
-		dist.clear();
+		routing_state.targeted_edges.clear();
+		routing_state.weighted_vertices.clear();
 
 		// Add the payee as a target, so that the payee-to-payer search algorithm knows what to start with.
 		match network.get_nodes().get(payee) {
 			None => {},
 			Some(node) => {
-				add_entries_to_cheapest_to_target_node!(node, payee, 0);
+				if first_hops.is_some() {
+					if let Some(&(ref first_hop, ref features)) = first_hop_targets.get(&payee) {
+						routing_state.add_vertice(*first_hop, our_node_id, payee, &DirectionalChannelInfo::default(), None::<u64>, features.to_context(), 0, network);
+					}
+				}
+				routing_state.select_weighted_vertice_to_target_edge(node, payee, 0, first_hops, network);
 			},
 		}
 
@@ -595,12 +596,23 @@ pub fn get_route<L: Deref>(our_node_id: &PublicKey, network: &NetworkGraph, paye
 							// bit lazy here. In the future, we should pull them out via our
 							// ChannelManager, but there's no reason to waste the space until we
 							// need them.
-							add_entry!(first_hop, *our_node_id , hop.src_node_id, dummy_directional_info, None::<u64>, features.to_context(), 0);
+							routing_state.add_vertice(*first_hop, our_node_id , &hop.src_node_id, &DirectionalChannelInfo::default(), None::<u64>, features.to_context(), 0, network);
 						}
 					}
 					// BOLT 11 doesn't allow inclusion of features for the last hop hints, which
 					// really sucks, cause we're gonna need that eventually.
-					add_entry!(hop.short_channel_id, hop.src_node_id, payee, hop, None::<u64>, ChannelFeatures::empty(), 0);
+
+					// Convert a route hint to a directional info
+					let from_route_hint = DirectionalChannelInfo {
+						last_update: 0,
+						enabled: false,
+						cltv_expiry_delta: hop.cltv_expiry_delta,
+						htlc_minimum_msat: hop.htlc_minimum_msat,
+						htlc_maximum_msat: hop.htlc_maximum_msat,
+						fees: hop.fees,
+						last_update_message: None,
+					};
+					routing_state.add_vertice(hop.short_channel_id, &hop.src_node_id, payee, &from_route_hint, None::<u64>, ChannelFeatures::empty(), 0, network);
 				}
 			}
 		}
@@ -609,12 +621,12 @@ pub fn get_route<L: Deref>(our_node_id: &PublicKey, network: &NetworkGraph, paye
 		let mut found_new_path = false;
 
 		// Step (2).
-		'path_construction: while let Some(RouteGraphNode { pubkey, lowest_fee_to_node, .. }) = targets.pop() {
+		'path_construction: while let Some(RouteGraphNode { pubkey, lowest_fee_to_node, .. }) = routing_state.targeted_edges.pop() {
 
 			// Since we're going payee-to-payer, hitting our node as a target means that we should stop traversing the
 			// graph and arrange the path out of what we found.
 			if pubkey == *our_node_id {
-				let mut new_entry = dist.remove(&our_node_id).unwrap();
+				let mut new_entry = routing_state.weighted_vertices.remove(&our_node_id).unwrap();
 				let mut ordered_hops = vec!(new_entry.clone());
 				// At most, we may need the value to be transferred and fees for that transfer.
 				// Assume 900% fees as the highest possible amount we may need, keep in mind fees may be charged on every hop.
@@ -650,7 +662,7 @@ pub fn get_route<L: Deref>(our_node_id: &PublicKey, network: &NetworkGraph, paye
 						break;
 					}
 
-					new_entry = match dist.remove(&ordered_hops.last().unwrap().route_hop.pubkey) {
+					new_entry = match routing_state.weighted_vertices.remove(&ordered_hops.last().unwrap().route_hop.pubkey) {
 						Some(payment_hop) => payment_hop,
 						None => {
 							// If we can't reach a given node, something wen't wrong during path traverse.
@@ -676,7 +688,7 @@ pub fn get_route<L: Deref>(our_node_id: &PublicKey, network: &NetworkGraph, paye
 
 				// Remember that we used these channels so that we don't rely on the same liquidity in future paths.
 				for (_, payment_hop) in payment_path.hops.iter().enumerate() {
-					let channel_liquidity_available_msat = bookkeeped_channels_liquidity_available_msat.get_mut(&payment_hop.route_hop.short_channel_id).unwrap();
+					let channel_liquidity_available_msat = routing_state.bookkeeped_channels_liquidity_available_msat.get_mut(&payment_hop.route_hop.short_channel_id).unwrap();
 					if *channel_liquidity_available_msat < payment_hop.get_fee_paid_msat() {
 						break 'path_construction;
 					}
@@ -685,7 +697,7 @@ pub fn get_route<L: Deref>(our_node_id: &PublicKey, network: &NetworkGraph, paye
 				// Track the total amount all our collected paths allow to send so that we:
 				// - know when to stop looking for more paths
 				// - know which of the hops are useless considering how much more sats we need
-				already_collected_value_msat += payment_path.get_value_msat();
+				routing_state.already_collected_value_msat += payment_path.get_value_msat();
 
 				payment_paths.push(payment_path);
 				found_new_path = true;
@@ -697,7 +709,12 @@ pub fn get_route<L: Deref>(our_node_id: &PublicKey, network: &NetworkGraph, paye
 			match network.get_nodes().get(&pubkey) {
 				None => {},
 				Some(node) => {
-					add_entries_to_cheapest_to_target_node!(node, &pubkey, lowest_fee_to_node);
+					if first_hops.is_some() {
+						if let Some(&(ref first_hop, ref features)) = first_hop_targets.get(&pubkey) {
+							routing_state.add_vertice(*first_hop, our_node_id, &pubkey, &DirectionalChannelInfo::default(), None::<u64>, features.to_context(), lowest_fee_to_node, network);
+						}
+					}
+					routing_state.select_weighted_vertice_to_target_edge(node, &pubkey, lowest_fee_to_node, first_hops, network);
 				},
 			}
 		}
@@ -706,7 +723,7 @@ pub fn get_route<L: Deref>(our_node_id: &PublicKey, network: &NetworkGraph, paye
 		// Stop either when recommended value is reached, or if during last iteration no new path was found.
 		// In the latter case, making another path finding attempt could not help,
 		// because we deterministically terminate the search due to low liquidity.
-		if already_collected_value_msat >= recommended_value_msat || !found_new_path {
+		if routing_state.already_collected_value_msat >= recommended_value_msat || !found_new_path {
 			break 'paths_collection;
 		}
 	}
@@ -716,7 +733,7 @@ pub fn get_route<L: Deref>(our_node_id: &PublicKey, network: &NetworkGraph, paye
 		return Err(LightningError{err: "Failed to find a path to the given destination".to_owned(), action: ErrorAction::IgnoreError});
 	}
 
-	if already_collected_value_msat < final_value_msat {
+	if routing_state.already_collected_value_msat < final_value_msat {
 		return Err(LightningError{err: "Failed to find a sufficient route to the given destination".to_owned(), action: ErrorAction::IgnoreError});
 	}
 
