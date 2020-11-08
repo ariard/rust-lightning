@@ -212,37 +212,9 @@ async fn find_fork<'a>(current_header: BlockHeaderData, prev_header: &'a BlockHe
 
 /// Adaptor used for notifying when blocks have been connected or disconnected from the chain.
 /// Useful for replaying chain data upon deserialization.
-pub trait ChainListener {
+pub trait ChainListener: Send + Sync {
 	fn block_connected(&mut self, block: &Block, height: u32);
 	fn block_disconnected(&mut self, header: &BlockHeader, height: u32);
-}
-
-impl<M, B, F, L> ChainListener for &SimpleArcChannelManager<M, B, F, L>
-		where M: chain::Watch<Keys=keysinterface::InMemoryChannelKeys>,
-		      B: chaininterface::BroadcasterInterface,
-		      F: chaininterface::FeeEstimator,
-		      L: logger::Logger {
-	fn block_connected(&mut self, block: &Block, height: u32) {
-		let txdata: Vec<_> = block.txdata.iter().enumerate().collect();
-		(**self).block_connected(&block.header, &txdata, height);
-	}
-	fn block_disconnected(&mut self, header: &BlockHeader, _height: u32) {
-		(**self).block_disconnected(header);
-	}
-}
-
-impl<CS, B, F, L> ChainListener for (&mut ChannelMonitor<CS>, &B, &F, &L)
-		where CS: keysinterface::ChannelKeys,
-		      B: chaininterface::BroadcasterInterface,
-		      F: chaininterface::FeeEstimator,
-		      L: logger::Logger {
-	fn block_connected(&mut self, block: &Block, height: u32) {
-		let txdata: Vec<_> = block.txdata.iter().enumerate().collect();
-		self.0.block_connected(&block.header, &txdata, height, self.1, self.2, self.3);
-	}
-	fn block_disconnected(&mut self, header: &BlockHeader, height: u32) {
-		self.0.block_disconnected(header, height, self.1, self.2, self.3);
-	}
 }
 
 /// Finds the fork point between new_header and old_header, disconnecting blocks from old_header to
