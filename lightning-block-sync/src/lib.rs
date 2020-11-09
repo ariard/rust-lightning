@@ -31,7 +31,7 @@ use lightning::ln::channelmanager::SimpleArcChannelManager;
 use lightning::util::logger;
 
 use std::future::Future;
-use std::ops::DerefMut;
+use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
 use std::vec::Vec;
 
@@ -213,8 +213,8 @@ async fn find_fork<'a>(current_header: BlockHeaderData, prev_header: &'a BlockHe
 /// Adaptor used for notifying when blocks have been connected or disconnected from the chain.
 /// Useful for replaying chain data upon deserialization.
 pub trait ChainListener: Send + Sync {
-	fn block_connected(&mut self, block: &Block, height: u32);
-	fn block_disconnected(&mut self, header: &BlockHeader, height: u32);
+	fn block_connected(&self, block: &Block, height: u32);
+	fn block_disconnected(&self, header: &BlockHeader, height: u32);
 }
 
 /// Finds the fork point between new_header and old_header, disconnecting blocks from old_header to
@@ -224,8 +224,10 @@ pub trait ChainListener: Send + Sync {
 /// disconnected to the fork point. Thus, we may return an Err() that includes where our tip ended
 /// up which may not be new_header. Note that iff the returned Err has a BlockHeaderData, the
 /// header transition from old_header to new_header is valid.
-async fn sync_chain_monitor<CL: ChainListener + Sized>(new_header: BlockHeaderData, old_header: &BlockHeaderData, block_source: &mut dyn BlockSource, chain_notifier: &mut CL, head_blocks: &mut Vec<BlockHeaderData>, mainnet: bool)
-		-> Result<(), (BlockSourceError, Option<BlockHeaderData>)> {
+async fn sync_chain_monitor<CL: Deref>(new_header: BlockHeaderData, old_header: &BlockHeaderData, block_source: &mut dyn BlockSource, chain_notifier: &mut CL, head_blocks: &mut Vec<BlockHeaderData>, mainnet: bool)
+		-> Result<(), (BlockSourceError, Option<BlockHeaderData>)>
+	where CL::Target: ChainListener,
+{
 	let mut events = find_fork(new_header, old_header, block_source, &*head_blocks, mainnet).await.map_err(|e| (e, None))?;
 
 	let mut last_disconnect_tip = None;
@@ -285,7 +287,9 @@ async fn sync_chain_monitor<CL: ChainListener + Sized>(new_header: BlockHeaderDa
 /// to bring each ChannelMonitor, as well as the overall ChannelManager, into sync with each other.
 ///
 /// Once you have them all at the same block, you should switch to using MicroSPVClient.
-pub async fn init_sync_chain_monitor<CL: ChainListener + Sized, B: BlockSource>(new_block: BlockHash, old_block: BlockHash, block_source: &mut B, mut chain_notifier: CL) {
+pub async fn init_sync_chain_monitor<CL: Deref, B: BlockSource>(new_block: BlockHash, old_block: BlockHash, block_source: &mut B, mut chain_notifier: CL)
+	where CL::Target: ChainListener,
+{
 	if &old_block[..] == &[0; 32] { return; }
 
 	let new_header = block_source.get_header(&new_block, None).await.unwrap();
@@ -312,7 +316,9 @@ pub async fn init_sync_chain_monitor<CL: ChainListener + Sized, B: BlockSource>(
 /// This prevents one block source from being able to orphan us on a fork of its own creation by
 /// not responding to requests for old headers on that fork. However, if one block source is
 /// unreachable this may result in our memory usage growing in accordance with the chain.
-pub struct MicroSPVClient<'a, B: DerefMut<Target=dyn BlockSource + 'a> + Sized + Sync + Send, CL: ChainListener + Sized> {
+pub struct MicroSPVClient<'a, B: DerefMut<Target=dyn BlockSource + 'a> + Sized + Sync + Send, CL: Deref>
+	where CL::Target: ChainListener,
+{
 	chain_tip: (BlockHash, BlockHeaderData),
 	block_sources: Vec<B>,
 	backup_block_sources: Vec<B>,
@@ -321,7 +327,9 @@ pub struct MicroSPVClient<'a, B: DerefMut<Target=dyn BlockSource + 'a> + Sized +
 	chain_notifier: CL,
 	mainnet: bool
 }
-impl<'a, B: DerefMut<Target=dyn BlockSource + 'a> + Sized + Sync + Send, CL: ChainListener + Sized> MicroSPVClient<'a, B, CL> {
+impl<'a, B: DerefMut<Target=dyn BlockSource + 'a> + Sized + Sync + Send, CL: Deref> MicroSPVClient<'a, B, CL>
+	where CL::Target: ChainListener,
+{
 	/// Create a new MicroSPVClient with a set of block sources and a chain listener which will
 	/// receive updates of the new tip.
 	///
