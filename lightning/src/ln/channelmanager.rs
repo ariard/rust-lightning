@@ -1271,9 +1271,9 @@ impl<ChanSigner: ChannelKeys, M: Deref, T: Deref, K: Deref, F: Deref, L: Deref> 
 					if chan.get().get_counterparty_node_id() != path.first().unwrap().pubkey {
 						return Err(APIError::RouteError{err: "Node ID mismatch on first hop!"});
 					}
-					if !chan.get().is_live() {
-						return Err(APIError::ChannelUnavailable{err: "Peer for first hop currently disconnected/pending monitor update!".to_owned()});
-					}
+					//if !chan.get().is_live() {
+					//	return Err(APIError::ChannelUnavailable{err: "Peer for first hop currently disconnected/pending monitor update!".to_owned()});
+					//}
 					break_chan_entry!(self, chan.get_mut().send_htlc_and_commit(htlc_msat, payment_hash.clone(), htlc_cltv, HTLCSource::OutboundRoute {
 						path: path.clone(),
 						session_priv: session_priv.clone(),
@@ -3093,7 +3093,7 @@ impl<ChanSigner: ChannelKeys, M: Deref, T: Deref, K: Deref, F: Deref, L: Deref> 
 								msg: announcement_sigs,
 							});
 						} else {
-							log_trace!(self.logger, "Sending funding_locked WITHOUT announcement_signatures for {}", log_bytes!(channel.channel_id()));
+							log_trace!(self.logger, "Sending funding_locked WITHOUT announcement_signatures for {} short_chan_id {}", log_bytes!(channel.channel_id()), channel.get_short_channel_id().unwrap());
 						}
 						short_to_id.insert(channel.get_short_channel_id().unwrap(), channel.channel_id());
 					}
