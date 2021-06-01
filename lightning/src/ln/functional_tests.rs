@@ -5127,6 +5127,7 @@ fn test_static_spendable_outputs_justice_tx_revoked_htlc_success_tx() {
 	check_spends!(spend_txn[2], revoked_local_txn[0], node_txn[1]); // Both outputs
 }
 
+//TODO: can you add another hop in this full onchain-to-onchain HTLC resolution ?
 #[test]
 fn test_onchain_to_onchain_claim() {
 	// Test that in case of channel closure, we detect the state of output and claim HTLC
