@@ -19,6 +19,7 @@ use core::cmp;
 use bitcoin::secp256k1::Signature;
 use bitcoin::secp256k1::key::{PublicKey, SecretKey};
 use bitcoin::secp256k1::constants::{PUBLIC_KEY_SIZE, SECRET_KEY_SIZE, COMPACT_SIGNATURE_SIZE};
+use bitcoin::blockdata::block::BlockHeader;
 use bitcoin::blockdata::script::Script;
 use bitcoin::blockdata::transaction::{OutPoint, Transaction, TxOut};
 use bitcoin::consensus;
@@ -809,6 +810,7 @@ macro_rules! impl_consensus_ser {
 }
 impl_consensus_ser!(Transaction);
 impl_consensus_ser!(TxOut);
+impl_consensus_ser!(BlockHeader);
 
 impl<T: Readable> Readable for Mutex<T> {
 	fn read<R: Read>(r: &mut R) -> Result<Self, DecodeError> {
