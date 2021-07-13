@@ -207,6 +207,7 @@ type ShutdownResult = (Option<(OutPoint, ChannelMonitorUpdate)>, Vec<(HTLCSource
 
 struct MsgHandleErrInternal {
 	err: msgs::LightningError,
+	chan_id: Option<[u8; 32]>,
 	shutdown_finish: Option<(ShutdownResult, Option<msgs::ChannelUpdate>)>,
 }
 impl MsgHandleErrInternal {
@@ -222,6 +223,7 @@ impl MsgHandleErrInternal {
 					},
 				},
 			},
+			chan_id: Some(channel_id),
 			shutdown_finish: None,
 		}
 	}
@@ -232,12 +234,13 @@ impl MsgHandleErrInternal {
 				err,
 				action: msgs::ErrorAction::IgnoreError,
 			},
+			chan_id: None,
 			shutdown_finish: None,
 		}
 	}
 	#[inline]
 	fn from_no_close(err: msgs::LightningError) -> Self {
-		Self { err, shutdown_finish: None }
+		Self { err, chan_id: None, shutdown_finish: None }
 	}
 	#[inline]
 	fn from_finish_shutdown(err: String, channel_id: [u8; 32], shutdown_res: ShutdownResult, channel_update: Option<msgs::ChannelUpdate>) -> Self {
@@ -251,6 +254,7 @@ impl MsgHandleErrInternal {
 					},
 				},
 			},
+			chan_id: Some(channel_id),
 			shutdown_finish: Some((shutdown_res, channel_update)),
 		}
 	}
@@ -281,6 +285,7 @@ impl MsgHandleErrInternal {
 					},
 				},
 			},
+			chan_id: Some(channel_id),
 			shutdown_finish: None,
 		}
 	}
@@ -756,7 +761,7 @@ macro_rules! handle_error {
 	($self: ident, $internal: expr, $counterparty_node_id: expr) => {
 		match $internal {
 			Ok(msg) => Ok(msg),
-			Err(MsgHandleErrInternal { err, shutdown_finish }) => {
+			Err(MsgHandleErrInternal { err, chan_id, shutdown_finish }) => {
 				#[cfg(debug_assertions)]
 				{
 					// In testing, ensure there are no deadlocks where the lock is already held upon
