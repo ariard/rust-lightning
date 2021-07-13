@@ -27,6 +27,7 @@
 use bitcoin::secp256k1::key::PublicKey;
 use bitcoin::secp256k1::Signature;
 use bitcoin::secp256k1;
+use bitcoin::blockdata::block::BlockHeader;
 use bitcoin::blockdata::script::Script;
 use bitcoin::hash_types::{Txid, BlockHash};
 
@@ -672,6 +673,14 @@ pub struct GossipTimestampFilter {
 	pub first_timestamp: u32,
 	/// The range of information in seconds
 	pub timestamp_range: u32,
+}
+
+/// A bitcoin header.
+pub struct BitcoinHeader {
+	/// The genesis hash of the blockchain being headers-sync
+	pub chain_hash: BlockHash,
+	/// The bitcoin header (at most 818 * 80 < 65535)
+	pub header: Vec<BlockHeader>,
 }
 
 /// Encoding type for data compression of collections in gossip queries.
@@ -1838,6 +1847,35 @@ impl Writeable for GossipTimestampFilter {
 	}
 }
 
+impl Readable for BitcoinHeader {
+	fn read<R: Read>(r: &mut R) -> Result<Self, DecodeError> {
+		let chain_hash: BlockHash = Readable::read(r)?;
+		let header: BlockHeader = Readable::read(r)?;
+		let encoding_len: u16 = Readable::read(r)?;
+		let header_count: u16 = (encoding_len)/80;
+		let mut header = Vec::with_capacity(header_count as usize);
+		for _ in 0..header_count {
+			header.push(Readable::read(r)?);
+		}
+		Ok(BitcoinHeader {
+			chain_hash,
+			header
+		})
+	}
+}
+
+impl Writeable for BitcoinHeader {
+	fn write<W: Writer>(&self, w: &mut W) -> Result<(), ::std::io::Error> {
+		let encoding_len: u16  = self.header.len() as u16 * 80;
+		w.size_hint(32 + encoding_len as usize);
+		self.chain_hash.write(w)?;
+		encoding_len.write(w)?;
+		for h in self.header.iter() {
+			h.write(w)?;
+		}
+		Ok(())
+	}
+}
 
 #[cfg(test)]
 mod tests {
