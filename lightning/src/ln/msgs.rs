@@ -676,6 +676,7 @@ pub struct GossipTimestampFilter {
 }
 
 /// A bitcoin header.
+#[derive(Clone, Debug, PartialEq)]
 pub struct BitcoinHeader {
 	/// The genesis hash of the blockchain being headers-sync
 	pub chain_hash: BlockHash,
@@ -892,7 +893,7 @@ pub trait RoutingMessageHandler : MessageSendEventsProvider {
 	fn handle_query_short_channel_ids(&self, their_node_id: &PublicKey, msg: QueryShortChannelIds) -> Result<(), LightningError>;
 }
 
-pub trait ApplicationMessageHandler {
+pub trait ApplicationMessageHandler : MessageSendEventsProvider {
 	fn handle_header(&self, msg: &BitcoinHeader) -> Result<(), LightningError>;
 }
 

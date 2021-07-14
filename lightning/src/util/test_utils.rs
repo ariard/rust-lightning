@@ -398,6 +398,12 @@ impl msgs::ApplicationMessageHandler for TestApplicationMessageHandler {
 	fn handle_header(&self, msg: &msgs::BitcoinHeader) -> Result<(), msgs::LightningError> { Ok(()) }
 }
 
+impl events::MessageSendEventsProvider for TestApplicationMessageHandler {
+	fn get_and_clear_pending_msg_events(&self) -> Vec<events::MessageSendEvent> {
+		vec![]
+	}
+}
+
 pub struct TestLogger {
 	level: Level,
 	id: String,

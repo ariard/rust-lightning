@@ -1042,6 +1042,9 @@ impl<Descriptor: SocketDescriptor, CM: Deref, RM: Deref, AM: Deref, L: Deref> Pe
 			wire::Message::GossipTimestampFilter(_msg) => {
 				// TODO: handle message
 			},
+			wire::Message::BitcoinHeader(msg) => {
+				self.message_handler.application_handler.handle_header(&msg)?;
+			},
 
 			// Unknown messages:
 			wire::Message::Unknown(msg_type) if msg_type.is_even() => {
@@ -1122,6 +1125,16 @@ impl<Descriptor: SocketDescriptor, CM: Deref, RM: Deref, AM: Deref, L: Deref> Pe
 					peer.pending_outbound_buffer.push_back(peer.channel_encryptor.encrypt_message(&encoded_msg[..]));
 				}
 			},
+			wire::Message::BitcoinHeader(ref msg) => {
+				let encoded_msg = encode_msg!(msg);
+
+				for (_, peer) in peers.peers.iter_mut() {
+					if except_node.is_some() && peer.their_node_id.as_ref() == except_node {
+						continue;
+					}
+					peer.pending_outbound_buffer.push_back(peer.channel_encryptor.encrypt_message(&encoded_msg[..]));
+				}
+			},
 			_ => debug_assert!(false, "We shouldn't attempt to forward anything but gossip messages"),
 		}
 	}
@@ -1145,6 +1158,7 @@ impl<Descriptor: SocketDescriptor, CM: Deref, RM: Deref, AM: Deref, L: Deref> Pe
 			let mut peers_lock = self.peers.lock().unwrap();
 			let mut events_generated = self.message_handler.chan_handler.get_and_clear_pending_msg_events();
 			events_generated.append(&mut self.message_handler.route_handler.get_and_clear_pending_msg_events());
+			events_generated.append(&mut self.message_handler.application_handler.get_and_clear_pending_msg_events());
 			let peers = &mut *peers_lock;
 			for event in events_generated.drain(..) {
 				macro_rules! get_peer_for_forwarding {
@@ -1333,6 +1347,9 @@ impl<Descriptor: SocketDescriptor, CM: Deref, RM: Deref, AM: Deref, L: Deref> Pe
 							msg.number_of_blocks,
 							msg.sync_complete);
 						self.enqueue_message(get_peer_for_forwarding!(node_id), msg);
+					},
+					MessageSendEvent::BroadcastBitcoinHeader { msg } => {
+						self.forward_broadcast_msg(peers, &wire::Message::BitcoinHeader(msg), None);
 					}
 				}
 			}
