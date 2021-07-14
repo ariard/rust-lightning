@@ -19,7 +19,7 @@ use bitcoin::secp256k1::key::{SecretKey,PublicKey};
 
 use ln::features::InitFeatures;
 use ln::msgs;
-use ln::msgs::{ChannelMessageHandler, LightningError, RoutingMessageHandler};
+use ln::msgs::{ChannelMessageHandler, LightningError, RoutingMessageHandler, ApplicationMessageHandler};
 use ln::channelmanager::{SimpleArcChannelManager, SimpleRefChannelManager};
 use util::ser::{VecWriter, Writeable};
 use ln::peer_channel_encryptor::{PeerChannelEncryptor,NextNoiseStep};
@@ -28,6 +28,7 @@ use ln::wire::Encode;
 use util::byte_utils;
 use util::events::{MessageSendEvent, MessageSendEventsProvider};
 use util::logger::Logger;
+use util::app::CustomMsgHandler;
 use routing::network_graph::NetGraphMsgHandler;
 
 use prelude::*;
@@ -62,6 +63,9 @@ impl RoutingMessageHandler for IgnoringMessageHandler {
 	fn handle_reply_short_channel_ids_end(&self, _their_node_id: &PublicKey, _msg: msgs::ReplyShortChannelIdsEnd) -> Result<(), LightningError> { Ok(()) }
 	fn handle_query_channel_range(&self, _their_node_id: &PublicKey, _msg: msgs::QueryChannelRange) -> Result<(), LightningError> { Ok(()) }
 	fn handle_query_short_channel_ids(&self, _their_node_id: &PublicKey, _msg: msgs::QueryShortChannelIds) -> Result<(), LightningError> { Ok(()) }
+}
+impl ApplicationMessageHandler for IgnoringMessageHandler {
+	fn handle_header(&self, _msg: &msgs::BitcoinHeader) -> Result<(), LightningError> { Ok(()) }
 }
 impl Deref for IgnoringMessageHandler {
 	type Target = IgnoringMessageHandler;
@@ -157,9 +161,10 @@ impl Deref for ErroringMessageHandler {
 }
 
 /// Provides references to trait impls which handle different types of messages.
-pub struct MessageHandler<CM: Deref, RM: Deref> where
+pub struct MessageHandler<CM: Deref, RM: Deref, AM: Deref> where
 		CM::Target: ChannelMessageHandler,
-		RM::Target: RoutingMessageHandler {
+		RM::Target: RoutingMessageHandler,
+		AM::Target: ApplicationMessageHandler, {
 	/// A message handler which handles messages specific to channels. Usually this is just a
 	/// [`ChannelManager`] object or an [`ErroringMessageHandler`].
 	///
@@ -171,6 +176,8 @@ pub struct MessageHandler<CM: Deref, RM: Deref> where
 	///
 	/// [`NetGraphMsgHandler`]: crate::routing::network_graph::NetGraphMsgHandler
 	pub route_handler: RM,
+	/// A message handler which handles messages dedicated to the application-layer
+	pub application_handler: AM,
 }
 
 /// Provides an object which can be used to send data to and which uniquely identifies a connection
@@ -311,7 +318,7 @@ fn _check_usize_is_32_or_64() {
 /// lifetimes). Other times you can afford a reference, which is more efficient, in which case
 /// SimpleRefPeerManager is the more appropriate type. Defining these type aliases prevents
 /// issues such as overly long function definitions.
-pub type SimpleArcPeerManager<SD, M, T, F, C, L> = PeerManager<SD, Arc<SimpleArcChannelManager<M, T, F, L>>, Arc<NetGraphMsgHandler<Arc<C>, Arc<L>>>, Arc<L>>;
+pub type SimpleArcPeerManager<SD, M, T, F, C, L> = PeerManager<SD, Arc<SimpleArcChannelManager<M, T, F, L>>, Arc<NetGraphMsgHandler<Arc<C>, Arc<L>>>, Arc<CustomMsgHandler>, Arc<L>>;
 
 /// SimpleRefPeerManager is a type alias for a PeerManager reference, and is the reference
 /// counterpart to the SimpleArcPeerManager type alias. Use this type by default when you don't
@@ -319,7 +326,7 @@ pub type SimpleArcPeerManager<SD, M, T, F, C, L> = PeerManager<SD, Arc<SimpleArc
 /// usage of lightning-net-tokio (since tokio::spawn requires parameters with static lifetimes).
 /// But if this is not necessary, using a reference is more efficient. Defining these type aliases
 /// helps with issues such as long function definitions.
-pub type SimpleRefPeerManager<'a, 'b, 'c, 'd, 'e, 'f, 'g, SD, M, T, F, C, L> = PeerManager<SD, SimpleRefChannelManager<'a, 'b, 'c, 'd, 'e, M, T, F, L>, &'e NetGraphMsgHandler<&'g C, &'f L>, &'f L>;
+pub type SimpleRefPeerManager<'a, 'b, 'c, 'd, 'e, 'f, 'g, 'h, SD, M, T, F, C, L> = PeerManager<SD, SimpleRefChannelManager<'a, 'b, 'c, 'd, 'e, M, T, F, L>, &'e NetGraphMsgHandler<&'g C, &'f L>, &'h CustomMsgHandler, &'f L>;
 
 /// A PeerManager manages a set of peers, described by their [`SocketDescriptor`] and marshalls
 /// socket events into messages which it passes on to its [`MessageHandler`].
@@ -340,11 +347,12 @@ pub type SimpleRefPeerManager<'a, 'b, 'c, 'd, 'e, 'f, 'g, SD, M, T, F, C, L> = P
 /// you're using lightning-net-tokio.
 ///
 /// [`read_event`]: PeerManager::read_event
-pub struct PeerManager<Descriptor: SocketDescriptor, CM: Deref, RM: Deref, L: Deref> where
+pub struct PeerManager<Descriptor: SocketDescriptor, CM: Deref, RM: Deref, AM: Deref, L: Deref> where
 		CM::Target: ChannelMessageHandler,
 		RM::Target: RoutingMessageHandler,
+		AM::Target: ApplicationMessageHandler,
 		L::Target: Logger {
-	message_handler: MessageHandler<CM, RM>,
+	message_handler: MessageHandler<CM, RM, AM>,
 	peers: Mutex<PeerHolder<Descriptor>>,
 	our_node_secret: SecretKey,
 	ephemeral_key_midstate: Sha256Engine,
@@ -382,7 +390,7 @@ macro_rules! encode_msg {
 	}}
 }
 
-impl<Descriptor: SocketDescriptor, CM: Deref, L: Deref> PeerManager<Descriptor, CM, IgnoringMessageHandler, L> where
+impl<Descriptor: SocketDescriptor, CM: Deref, L: Deref> PeerManager<Descriptor, CM, IgnoringMessageHandler, IgnoringMessageHandler, L> where
 		CM::Target: ChannelMessageHandler,
 		L::Target: Logger {
 	/// Constructs a new PeerManager with the given ChannelMessageHandler. No routing message
@@ -396,11 +404,12 @@ impl<Descriptor: SocketDescriptor, CM: Deref, L: Deref> PeerManager<Descriptor, 
 		Self::new(MessageHandler {
 			chan_handler: channel_message_handler,
 			route_handler: IgnoringMessageHandler{},
+			application_handler: IgnoringMessageHandler{},
 		}, our_node_secret, ephemeral_random_data, logger)
 	}
 }
 
-impl<Descriptor: SocketDescriptor, RM: Deref, L: Deref> PeerManager<Descriptor, ErroringMessageHandler, RM, L> where
+impl<Descriptor: SocketDescriptor, RM: Deref, L: Deref> PeerManager<Descriptor, ErroringMessageHandler, RM, IgnoringMessageHandler, L> where
 		RM::Target: RoutingMessageHandler,
 		L::Target: Logger {
 	/// Constructs a new PeerManager with the given RoutingMessageHandler. No channel message
@@ -416,18 +425,20 @@ impl<Descriptor: SocketDescriptor, RM: Deref, L: Deref> PeerManager<Descriptor, 
 		Self::new(MessageHandler {
 			chan_handler: ErroringMessageHandler::new(),
 			route_handler: routing_message_handler,
+			application_handler: IgnoringMessageHandler{},
 		}, our_node_secret, ephemeral_random_data, logger)
 	}
 }
 
-impl<Descriptor: SocketDescriptor, CM: Deref, RM: Deref, L: Deref> PeerManager<Descriptor, CM, RM, L> where
+impl<Descriptor: SocketDescriptor, CM: Deref, RM: Deref, AM: Deref, L: Deref> PeerManager<Descriptor, CM, RM, AM, L> where
 		CM::Target: ChannelMessageHandler,
 		RM::Target: RoutingMessageHandler,
+		AM::Target: ApplicationMessageHandler,
 		L::Target: Logger {
 	/// Constructs a new PeerManager with the given message handlers and node_id secret key
 	/// ephemeral_random_data is used to derive per-connection ephemeral keys and must be
 	/// cryptographically secure random bytes.
-	pub fn new(message_handler: MessageHandler<CM, RM>, our_node_secret: SecretKey, ephemeral_random_data: &[u8; 32], logger: L) -> Self {
+	pub fn new(message_handler: MessageHandler<CM, RM, AM>, our_node_secret: SecretKey, ephemeral_random_data: &[u8; 32], logger: L) -> Self {
 		let mut ephemeral_key_midstate = Sha256::engine();
 		ephemeral_key_midstate.input(ephemeral_random_data);
 
@@ -1479,6 +1490,7 @@ mod tests {
 	struct PeerManagerCfg {
 		chan_handler: test_utils::TestChannelMessageHandler,
 		routing_handler: test_utils::TestRoutingMessageHandler,
+		application_handler: test_utils::TestApplicationMessageHandler,
 		logger: test_utils::TestLogger,
 	}
 
@@ -1490,6 +1502,7 @@ mod tests {
 					chan_handler: test_utils::TestChannelMessageHandler::new(),
 					logger: test_utils::TestLogger::new(),
 					routing_handler: test_utils::TestRoutingMessageHandler::new(),
+					application_handler: test_utils::TestApplicationMessageHandler::new(),
 				}
 			);
 		}
@@ -1497,12 +1510,12 @@ mod tests {
 		cfgs
 	}
 
-	fn create_network<'a>(peer_count: usize, cfgs: &'a Vec<PeerManagerCfg>) -> Vec<PeerManager<FileDescriptor, &'a test_utils::TestChannelMessageHandler, &'a test_utils::TestRoutingMessageHandler, &'a test_utils::TestLogger>> {
+	fn create_network<'a>(peer_count: usize, cfgs: &'a Vec<PeerManagerCfg>) -> Vec<PeerManager<FileDescriptor, &'a test_utils::TestChannelMessageHandler, &'a test_utils::TestRoutingMessageHandler, &'a test_utils::TestApplicationMessageHandler, &'a test_utils::TestLogger>> {
 		let mut peers = Vec::new();
 		for i in 0..peer_count {
 			let node_secret = SecretKey::from_slice(&[42 + i as u8; 32]).unwrap();
 			let ephemeral_bytes = [i as u8; 32];
-			let msg_handler = MessageHandler { chan_handler: &cfgs[i].chan_handler, route_handler: &cfgs[i].routing_handler };
+			let msg_handler = MessageHandler { chan_handler: &cfgs[i].chan_handler, route_handler: &cfgs[i].routing_handler, application_handler: &cfgs[i].application_handler };
 			let peer = PeerManager::new(msg_handler, node_secret, &ephemeral_bytes, &cfgs[i].logger);
 			peers.push(peer);
 		}
@@ -1510,7 +1523,7 @@ mod tests {
 		peers
 	}
 
-	fn establish_connection<'a>(peer_a: &PeerManager<FileDescriptor, &'a test_utils::TestChannelMessageHandler, &'a test_utils::TestRoutingMessageHandler, &'a test_utils::TestLogger>, peer_b: &PeerManager<FileDescriptor, &'a test_utils::TestChannelMessageHandler, &'a test_utils::TestRoutingMessageHandler, &'a test_utils::TestLogger>) -> (FileDescriptor, FileDescriptor) {
+	fn establish_connection<'a>(peer_a: &PeerManager<FileDescriptor, &'a test_utils::TestChannelMessageHandler, &'a test_utils::TestRoutingMessageHandler, &'a test_utils::TestApplicationMessageHandler, &'a test_utils::TestLogger>, peer_b: &PeerManager<FileDescriptor, &'a test_utils::TestChannelMessageHandler, &'a test_utils::TestRoutingMessageHandler, &'a test_utils::TestApplicationMessageHandler,  &'a test_utils::TestLogger>) -> (FileDescriptor, FileDescriptor) {
 		let secp_ctx = Secp256k1::new();
 		let a_id = PublicKey::from_secret_key(&secp_ctx, &peer_a.our_node_secret);
 		let mut fd_a = FileDescriptor { fd: 1, outbound_data: Arc::new(Mutex::new(Vec::new())) };

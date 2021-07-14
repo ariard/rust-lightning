@@ -892,6 +892,10 @@ pub trait RoutingMessageHandler : MessageSendEventsProvider {
 	fn handle_query_short_channel_ids(&self, their_node_id: &PublicKey, msg: QueryShortChannelIds) -> Result<(), LightningError>;
 }
 
+pub trait ApplicationMessageHandler {
+	fn handle_header(&self, msg: &BitcoinHeader) -> Result<(), LightningError>;
+}
+
 mod fuzzy_internal_msgs {
 	use prelude::*;
 	use ln::PaymentSecret;

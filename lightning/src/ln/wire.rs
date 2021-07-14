@@ -54,6 +54,7 @@ pub enum Message {
 	QueryChannelRange(msgs::QueryChannelRange),
 	ReplyChannelRange(msgs::ReplyChannelRange),
 	GossipTimestampFilter(msgs::GossipTimestampFilter),
+
 	/// A message that could not be decoded because its type is unknown.
 	Unknown(MessageType),
 }
