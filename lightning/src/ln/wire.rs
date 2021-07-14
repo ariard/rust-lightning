@@ -54,7 +54,7 @@ pub enum Message {
 	QueryChannelRange(msgs::QueryChannelRange),
 	ReplyChannelRange(msgs::ReplyChannelRange),
 	GossipTimestampFilter(msgs::GossipTimestampFilter),
-
+	BitcoinHeader(msgs::BitcoinHeader),
 	/// A message that could not be decoded because its type is unknown.
 	Unknown(MessageType),
 }
@@ -96,6 +96,7 @@ impl Message {
 			&Message::QueryChannelRange(ref msg) => msg.type_id(),
 			&Message::ReplyChannelRange(ref msg) => msg.type_id(),
 			&Message::GossipTimestampFilter(ref msg) => msg.type_id(),
+			&Message::BitcoinHeader(ref msg) => msg.type_id(),
 			&Message::Unknown(type_id) => type_id,
 		}
 	}
@@ -206,6 +207,9 @@ pub fn read<R: ::std::io::Read>(buffer: &mut R) -> Result<Message, msgs::DecodeE
 		}
 		msgs::GossipTimestampFilter::TYPE => {
 			Ok(Message::GossipTimestampFilter(Readable::read(buffer)?))
+		},
+		msgs::BitcoinHeader::TYPE => {
+			Ok(Message::BitcoinHeader(Readable::read(buffer)?))
 		},
 		_ => {
 			Ok(Message::Unknown(MessageType(message_type)))
@@ -348,6 +352,10 @@ impl Encode for msgs::ReplyChannelRange {
 
 impl Encode for msgs::GossipTimestampFilter {
 	const TYPE: u16 = 265;
+}
+
+impl Encode for msgs::BitcoinHeader {
+	const TYPE: u16 = 266;
 }
 
 #[cfg(test)]
