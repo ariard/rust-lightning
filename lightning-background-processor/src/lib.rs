@@ -14,7 +14,7 @@ use lightning::chain::chainmonitor::ChainMonitor;
 use lightning::chain::channelmonitor;
 use lightning::chain::keysinterface::{Sign, KeysInterface};
 use lightning::ln::channelmanager::ChannelManager;
-use lightning::ln::msgs::{ChannelMessageHandler, RoutingMessageHandler};
+use lightning::ln::msgs::{ChannelMessageHandler, RoutingMessageHandler, ApplicationMessageHandler};
 use lightning::ln::peer_handler::{PeerManager, SocketDescriptor};
 use lightning::util::events::{EventHandler, EventsProvider};
 use lightning::util::logger::Logger;
@@ -114,11 +114,12 @@ impl BackgroundProcessor {
 		Descriptor: 'static + SocketDescriptor + Send + Sync,
 		CMH: 'static + Deref + Send + Sync,
 		RMH: 'static + Deref + Send + Sync,
+		AMH: 'static + Deref + Send + Sync,
 		EH: 'static + EventHandler + Send + Sync,
 		CMP: 'static + Send + ChannelManagerPersister<Signer, CW, T, K, F, L>,
 		M: 'static + Deref<Target = ChainMonitor<Signer, CF, T, F, L, P>> + Send + Sync,
 		CM: 'static + Deref<Target = ChannelManager<Signer, CW, T, K, F, L>> + Send + Sync,
-		PM: 'static + Deref<Target = PeerManager<Descriptor, CMH, RMH, L>> + Send + Sync,
+		PM: 'static + Deref<Target = PeerManager<Descriptor, CMH, RMH, AMH, L>> + Send + Sync,
 	>
 	(persister: CMP, event_handler: EH, chain_monitor: M, channel_manager: CM, peer_manager: PM, logger: L) -> Self
 	where
@@ -131,6 +132,7 @@ impl BackgroundProcessor {
 		P::Target: 'static + channelmonitor::Persist<Signer>,
 		CMH::Target: 'static + ChannelMessageHandler,
 		RMH::Target: 'static + RoutingMessageHandler,
+		AMH::Target: 'static + ApplicationMessageHandler,
 	{
 		let stop_thread = Arc::new(AtomicBool::new(false));
 		let stop_thread_clone = stop_thread.clone();
@@ -210,7 +212,7 @@ mod tests {
 
 	struct Node {
 		node: Arc<SimpleArcChannelManager<ChainMonitor, test_utils::TestBroadcaster, test_utils::TestFeeEstimator, test_utils::TestLogger>>,
-		peer_manager: Arc<PeerManager<TestDescriptor, Arc<test_utils::TestChannelMessageHandler>, Arc<test_utils::TestRoutingMessageHandler>, Arc<test_utils::TestLogger>>>,
+		peer_manager: Arc<PeerManager<TestDescriptor, Arc<test_utils::TestChannelMessageHandler>, Arc<test_utils::TestRoutingMessageHandler>, Arc<test_utils::TestApplicationMessageHandler>, Arc<test_utils::TestLogger>>>,
 		chain_monitor: Arc<ChainMonitor>,
 		persister: Arc<FilesystemPersister>,
 		tx_broadcaster: Arc<test_utils::TestBroadcaster>,
@@ -250,7 +252,7 @@ mod tests {
 			let best_block = BestBlock::from_genesis(network);
 			let params = ChainParameters { network, best_block };
 			let manager = Arc::new(ChannelManager::new(fee_estimator.clone(), chain_monitor.clone(), tx_broadcaster.clone(), logger.clone(), keys_manager.clone(), UserConfig::default(), params));
-			let msg_handler = MessageHandler { chan_handler: Arc::new(test_utils::TestChannelMessageHandler::new()), route_handler: Arc::new(test_utils::TestRoutingMessageHandler::new() )};
+			let msg_handler = MessageHandler { chan_handler: Arc::new(test_utils::TestChannelMessageHandler::new()), route_handler: Arc::new(test_utils::TestRoutingMessageHandler::new() ), application_handler: Arc::new(test_utils::TestApplicationMessageHandler::new()) };
 			let peer_manager = Arc::new(PeerManager::new(msg_handler, keys_manager.get_node_secret(), &seed, logger.clone()));
 			let node = Node { node: manager, peer_manager, chain_monitor, persister, tx_broadcaster, logger, best_block };
 			nodes.push(node);

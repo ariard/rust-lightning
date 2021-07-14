@@ -80,7 +80,7 @@ use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use lightning::ln::peer_handler;
 use lightning::ln::peer_handler::SocketDescriptor as LnSocketTrait;
-use lightning::ln::msgs::{ChannelMessageHandler, RoutingMessageHandler};
+use lightning::ln::msgs::{ChannelMessageHandler, RoutingMessageHandler, ApplicationMessageHandler};
 use lightning::util::logger::Logger;
 
 use std::task;
@@ -119,9 +119,10 @@ struct Connection {
 	id: u64,
 }
 impl Connection {
-	async fn schedule_read<CMH, RMH, L>(peer_manager: Arc<peer_handler::PeerManager<SocketDescriptor, Arc<CMH>, Arc<RMH>, Arc<L>>>, us: Arc<Mutex<Self>>, mut reader: io::ReadHalf<TcpStream>, mut read_wake_receiver: mpsc::Receiver<()>, mut write_avail_receiver: mpsc::Receiver<()>) where
+	async fn schedule_read<CMH, RMH, AMH, L>(peer_manager: Arc<peer_handler::PeerManager<SocketDescriptor, Arc<CMH>, Arc<RMH>, Arc<AMH>, Arc<L>>>, us: Arc<Mutex<Self>>, mut reader: io::ReadHalf<TcpStream>, mut read_wake_receiver: mpsc::Receiver<()>, mut write_avail_receiver: mpsc::Receiver<()>) where
 			CMH: ChannelMessageHandler + 'static,
 			RMH: RoutingMessageHandler + 'static,
+			AMH: ApplicationMessageHandler + 'static,
 			L: Logger + 'static + ?Sized {
 		// 8KB is nice and big but also should never cause any issues with stack overflowing.
 		let mut buf = [0; 8192];
@@ -222,9 +223,10 @@ impl Connection {
 /// The returned future will complete when the peer is disconnected and associated handling
 /// futures are freed, though, because all processing futures are spawned with tokio::spawn, you do
 /// not need to poll the provided future in order to make progress.
-pub fn setup_inbound<CMH, RMH, L>(peer_manager: Arc<peer_handler::PeerManager<SocketDescriptor, Arc<CMH>, Arc<RMH>, Arc<L>>>, stream: StdTcpStream) -> impl std::future::Future<Output=()> where
+pub fn setup_inbound<CMH, RMH, AMH, L>(peer_manager: Arc<peer_handler::PeerManager<SocketDescriptor, Arc<CMH>, Arc<RMH>, Arc<AMH>, Arc<L>>>, stream: StdTcpStream) -> impl std::future::Future<Output=()> where
 		CMH: ChannelMessageHandler + 'static + Send + Sync,
 		RMH: RoutingMessageHandler + 'static + Send + Sync,
+		AMH: ApplicationMessageHandler + 'static + Send + Sync,
 		L: Logger + 'static + ?Sized + Send + Sync {
 	let (reader, write_receiver, read_receiver, us) = Connection::new(stream);
 	#[cfg(debug_assertions)]
@@ -262,9 +264,10 @@ pub fn setup_inbound<CMH, RMH, L>(peer_manager: Arc<peer_handler::PeerManager<So
 /// The returned future will complete when the peer is disconnected and associated handling
 /// futures are freed, though, because all processing futures are spawned with tokio::spawn, you do
 /// not need to poll the provided future in order to make progress.
-pub fn setup_outbound<CMH, RMH, L>(peer_manager: Arc<peer_handler::PeerManager<SocketDescriptor, Arc<CMH>, Arc<RMH>, Arc<L>>>, their_node_id: PublicKey, stream: StdTcpStream) -> impl std::future::Future<Output=()> where
+pub fn setup_outbound<CMH, RMH, AMH, L>(peer_manager: Arc<peer_handler::PeerManager<SocketDescriptor, Arc<CMH>, Arc<RMH>, Arc<AMH>, Arc<L>>>, their_node_id: PublicKey, stream: StdTcpStream) -> impl std::future::Future<Output=()> where
 		CMH: ChannelMessageHandler + 'static + Send + Sync,
 		RMH: RoutingMessageHandler + 'static + Send + Sync,
+		AMH: ApplicationMessageHandler + 'static + Send + Sync,
 		L: Logger + 'static + ?Sized + Send + Sync {
 	let (reader, mut write_receiver, read_receiver, us) = Connection::new(stream);
 	#[cfg(debug_assertions)]
@@ -332,9 +335,10 @@ pub fn setup_outbound<CMH, RMH, L>(peer_manager: Arc<peer_handler::PeerManager<S
 /// disconnected and associated handling futures are freed, though, because all processing in said
 /// futures are spawned with tokio::spawn, you do not need to poll the second future in order to
 /// make progress.
-pub async fn connect_outbound<CMH, RMH, L>(peer_manager: Arc<peer_handler::PeerManager<SocketDescriptor, Arc<CMH>, Arc<RMH>, Arc<L>>>, their_node_id: PublicKey, addr: SocketAddr) -> Option<impl std::future::Future<Output=()>> where
+pub async fn connect_outbound<CMH, RMH, AMH, L>(peer_manager: Arc<peer_handler::PeerManager<SocketDescriptor, Arc<CMH>, Arc<RMH>, Arc<AMH>, Arc<L>>>, their_node_id: PublicKey, addr: SocketAddr) -> Option<impl std::future::Future<Output=()>> where
 		CMH: ChannelMessageHandler + 'static + Send + Sync,
 		RMH: RoutingMessageHandler + 'static + Send + Sync,
+		AMH: ApplicationMessageHandler + 'static + Send + Sync,
 		L: Logger + 'static + ?Sized + Send + Sync {
 	if let Ok(Ok(stream)) = time::timeout(Duration::from_secs(10), async { TcpStream::connect(&addr).await.map(|s| s.into_std().unwrap()) }).await {
 		Some(setup_outbound(peer_manager, their_node_id, stream))
@@ -536,6 +540,9 @@ mod tests {
 		fn handle_channel_reestablish(&self, _their_node_id: &PublicKey, _msg: &ChannelReestablish) {}
 		fn handle_error(&self, _their_node_id: &PublicKey, _msg: &ErrorMessage) {}
 	}
+	impl ApplicationMessageHandler for MsgHandler {
+		fn handle_header(&self, msg: &BitcoinHeader) -> Result<(), LightningError> { Ok(()) }
+	}
 	impl MessageSendEventsProvider for MsgHandler {
 		fn get_and_clear_pending_msg_events(&self) -> Vec<MessageSendEvent> {
 			let mut ret = Vec::new();
@@ -563,6 +570,7 @@ mod tests {
 		let a_manager = Arc::new(PeerManager::new(MessageHandler {
 			chan_handler: Arc::clone(&a_handler),
 			route_handler: Arc::clone(&a_handler),
+			application_handler: Arc::clone(&a_handler),
 		}, a_key.clone(), &[1; 32], Arc::new(TestLogger())));
 
 		let (b_connected_sender, mut b_connected) = mpsc::channel(1);
@@ -577,6 +585,7 @@ mod tests {
 		let b_manager = Arc::new(PeerManager::new(MessageHandler {
 			chan_handler: Arc::clone(&b_handler),
 			route_handler: Arc::clone(&b_handler),
+			application_handler: Arc::clone(&b_handler),
 		}, b_key.clone(), &[2; 32], Arc::new(TestLogger())));
 
 		// We bind on localhost, hoping the environment is properly configured with a local

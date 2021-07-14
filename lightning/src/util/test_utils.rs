@@ -386,6 +386,18 @@ impl events::MessageSendEventsProvider for TestRoutingMessageHandler {
 	}
 }
 
+pub struct TestApplicationMessageHandler {}
+
+impl TestApplicationMessageHandler {
+	pub fn new() -> Self {
+		TestApplicationMessageHandler {}
+	}
+}
+
+impl msgs::ApplicationMessageHandler for TestApplicationMessageHandler {
+	fn handle_header(&self, msg: &msgs::BitcoinHeader) -> Result<(), msgs::LightningError> { Ok(()) }
+}
+
 pub struct TestLogger {
 	level: Level,
 	id: String,
