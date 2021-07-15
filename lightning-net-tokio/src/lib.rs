@@ -541,7 +541,7 @@ mod tests {
 		fn handle_error(&self, _their_node_id: &PublicKey, _msg: &ErrorMessage) {}
 	}
 	impl ApplicationMessageHandler for MsgHandler {
-		fn handle_header(&self, msg: &BitcoinHeader) -> Result<(), LightningError> { Ok(()) }
+		fn handle_header(&self, mut msg: BitcoinHeader) -> Result<(), LightningError> { Ok(()) }
 	}
 	impl MessageSendEventsProvider for MsgHandler {
 		fn get_and_clear_pending_msg_events(&self) -> Vec<MessageSendEvent> {
