@@ -395,7 +395,7 @@ impl TestApplicationMessageHandler {
 }
 
 impl msgs::ApplicationMessageHandler for TestApplicationMessageHandler {
-	fn handle_header(&self, msg: &msgs::BitcoinHeader) -> Result<(), msgs::LightningError> { Ok(()) }
+	fn handle_header(&self, msg: msgs::BitcoinHeader) -> Result<(), msgs::LightningError> { Ok(()) }
 }
 
 impl events::MessageSendEventsProvider for TestApplicationMessageHandler {

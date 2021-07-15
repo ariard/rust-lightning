@@ -21,6 +21,7 @@ use ln::features::InitFeatures;
 use ln::msgs;
 use ln::msgs::{ChannelMessageHandler, LightningError, RoutingMessageHandler, ApplicationMessageHandler};
 use ln::channelmanager::{SimpleArcChannelManager, SimpleRefChannelManager};
+use ln::app::CustomMsgHandler;
 use util::ser::{VecWriter, Writeable};
 use ln::peer_channel_encryptor::{PeerChannelEncryptor,NextNoiseStep};
 use ln::wire;
@@ -28,7 +29,6 @@ use ln::wire::Encode;
 use util::byte_utils;
 use util::events::{MessageSendEvent, MessageSendEventsProvider};
 use util::logger::Logger;
-use util::app::CustomMsgHandler;
 use routing::network_graph::NetGraphMsgHandler;
 
 use prelude::*;
@@ -65,7 +65,7 @@ impl RoutingMessageHandler for IgnoringMessageHandler {
 	fn handle_query_short_channel_ids(&self, _their_node_id: &PublicKey, _msg: msgs::QueryShortChannelIds) -> Result<(), LightningError> { Ok(()) }
 }
 impl ApplicationMessageHandler for IgnoringMessageHandler {
-	fn handle_header(&self, _msg: &msgs::BitcoinHeader) -> Result<(), LightningError> { Ok(()) }
+	fn handle_header(&self, mut _msg: msgs::BitcoinHeader) -> Result<(), LightningError> { Ok(()) }
 }
 impl Deref for IgnoringMessageHandler {
 	type Target = IgnoringMessageHandler;
@@ -1043,7 +1043,7 @@ impl<Descriptor: SocketDescriptor, CM: Deref, RM: Deref, AM: Deref, L: Deref> Pe
 				// TODO: handle message
 			},
 			wire::Message::BitcoinHeader(msg) => {
-				self.message_handler.application_handler.handle_header(&msg)?;
+				self.message_handler.application_handler.handle_header(msg)?;
 			},
 
 			// Unknown messages:

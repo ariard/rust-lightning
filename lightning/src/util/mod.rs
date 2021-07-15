@@ -19,7 +19,6 @@ pub mod events;
 pub mod errors;
 pub mod ser;
 pub mod message_signing;
-pub mod app;
 
 pub(crate) mod byte_utils;
 pub(crate) mod chacha20;

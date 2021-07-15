@@ -894,7 +894,7 @@ pub trait RoutingMessageHandler : MessageSendEventsProvider {
 }
 
 pub trait ApplicationMessageHandler : MessageSendEventsProvider {
-	fn handle_header(&self, msg: &BitcoinHeader) -> Result<(), LightningError>;
+	fn handle_header(&self, msg: BitcoinHeader) -> Result<(), LightningError>;
 }
 
 mod fuzzy_internal_msgs {
