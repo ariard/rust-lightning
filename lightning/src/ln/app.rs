@@ -7,6 +7,8 @@
 // You may not use this file except in accordance with one or both of these
 // licenses.
 
+//! Utilities to manage custom messages.
+
 use bitcoin::blockdata::block::BlockHeader;
 use bitcoin::hash_types::BlockHash;
 
@@ -21,6 +23,7 @@ use std::ops::DerefMut;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+/// Handler which keep track of the connection state with the chain validation engine.
 pub struct CustomMsgHandler {
 	chain_hash: BlockHash,
 	to_validation: Mutex<Vec<BlockHeader>>,
@@ -31,6 +34,8 @@ pub struct CustomMsgHandler {
 }
 
 impl CustomMsgHandler {
+	/// Constructs a new CustomMsgHandler to hold connection state with chain validation
+	/// engine.
 	pub fn new(hash: BlockHash, port: u16) -> CustomMsgHandler {
 		let socket = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), port);
 		CustomMsgHandler {
@@ -43,6 +48,7 @@ impl CustomMsgHandler {
 		}
 	}
 
+	/// Process incoming/outgoing headers.
 	pub fn process_pending_events(&self) {
 
 		let mut valid_headers: Vec<BlockHeader> = Vec::new();

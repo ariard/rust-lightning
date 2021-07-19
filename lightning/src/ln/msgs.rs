@@ -893,7 +893,9 @@ pub trait RoutingMessageHandler : MessageSendEventsProvider {
 	fn handle_query_short_channel_ids(&self, their_node_id: &PublicKey, msg: QueryShortChannelIds) -> Result<(), LightningError>;
 }
 
+/// A trait to describe an object which can receive base layer message.
 pub trait ApplicationMessageHandler : MessageSendEventsProvider {
+	/// Handle a blockchain header.
 	fn handle_header(&self, msg: BitcoinHeader) -> Result<(), LightningError>;
 }
 
