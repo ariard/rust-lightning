@@ -13,6 +13,7 @@ use lightning::chain::chaininterface::{BroadcasterInterface, FeeEstimator};
 use lightning::chain::chainmonitor::ChainMonitor;
 use lightning::chain::channelmonitor;
 use lightning::chain::keysinterface::{Sign, KeysInterface};
+use lightning::ln::app::CustomMsgHandler;
 use lightning::ln::channelmanager::ChannelManager;
 use lightning::ln::msgs::{ChannelMessageHandler, RoutingMessageHandler, ApplicationMessageHandler};
 use lightning::ln::peer_handler::{PeerManager, SocketDescriptor};
@@ -120,8 +121,9 @@ impl BackgroundProcessor {
 		M: 'static + Deref<Target = ChainMonitor<Signer, CF, T, F, L, P>> + Send + Sync,
 		CM: 'static + Deref<Target = ChannelManager<Signer, CW, T, K, F, L>> + Send + Sync,
 		PM: 'static + Deref<Target = PeerManager<Descriptor, CMH, RMH, AMH, L>> + Send + Sync,
+		AM: 'static + Deref<Target = CustomMsgHandler> + Send + Sync,
 	>
-	(persister: CMP, event_handler: EH, chain_monitor: M, channel_manager: CM, peer_manager: PM, logger: L) -> Self
+	(persister: CMP, event_handler: EH, chain_monitor: M, channel_manager: CM, peer_manager: PM, custom_handler: AM, logger: L) -> Self
 	where
 		CF::Target: 'static + chain::Filter,
 		CW::Target: 'static + chain::Watch<Signer>,
@@ -142,6 +144,7 @@ impl BackgroundProcessor {
 				peer_manager.process_events();
 				channel_manager.process_pending_events(&event_handler);
 				chain_monitor.process_pending_events(&event_handler);
+				custom_handler.process_pending_events();
 				let updates_available =
 					channel_manager.await_persistable_update_timeout(Duration::from_millis(100));
 				if updates_available {
@@ -181,6 +184,7 @@ mod tests {
 	use lightning::chain::keysinterface::{InMemorySigner, KeysInterface, KeysManager};
 	use lightning::chain::transaction::OutPoint;
 	use lightning::get_event_msg;
+	use lightning::ln::app::CustomMsgHandler;
 	use lightning::ln::channelmanager::{BREAKDOWN_TIMEOUT, ChainParameters, ChannelManager, SimpleArcChannelManager};
 	use lightning::ln::features::InitFeatures;
 	use lightning::ln::msgs::ChannelMessageHandler;
@@ -217,6 +221,7 @@ mod tests {
 		persister: Arc<FilesystemPersister>,
 		tx_broadcaster: Arc<test_utils::TestBroadcaster>,
 		logger: Arc<test_utils::TestLogger>,
+		app_handler: Arc<CustomMsgHandler>,
 		best_block: BestBlock,
 	}
 
@@ -254,7 +259,8 @@ mod tests {
 			let manager = Arc::new(ChannelManager::new(fee_estimator.clone(), chain_monitor.clone(), tx_broadcaster.clone(), logger.clone(), keys_manager.clone(), UserConfig::default(), params));
 			let msg_handler = MessageHandler { chan_handler: Arc::new(test_utils::TestChannelMessageHandler::new()), route_handler: Arc::new(test_utils::TestRoutingMessageHandler::new() ), application_handler: Arc::new(test_utils::TestApplicationMessageHandler::new()) };
 			let peer_manager = Arc::new(PeerManager::new(msg_handler, keys_manager.get_node_secret(), &seed, logger.clone()));
-			let node = Node { node: manager, peer_manager, chain_monitor, persister, tx_broadcaster, logger, best_block };
+			let app_handler = Arc::new(CustomMsgHandler::new(genesis_block(network).block_hash(), 10042));
+			let node = Node { node: manager, peer_manager, chain_monitor, persister, tx_broadcaster, logger, best_block, app_handler };
 			nodes.push(node);
 		}
 		nodes
@@ -344,7 +350,7 @@ mod tests {
 		let data_dir = nodes[0].persister.get_data_dir();
 		let persister = move |node: &ChannelManager<InMemorySigner, Arc<ChainMonitor>, Arc<test_utils::TestBroadcaster>, Arc<KeysManager>, Arc<test_utils::TestFeeEstimator>, Arc<test_utils::TestLogger>>| FilesystemPersister::persist_manager(data_dir.clone(), node);
 		let event_handler = |_| {};
-		let bg_processor = BackgroundProcessor::start(persister, event_handler, nodes[0].chain_monitor.clone(), nodes[0].node.clone(), nodes[0].peer_manager.clone(), nodes[0].logger.clone());
+		let bg_processor = BackgroundProcessor::start(persister, event_handler, nodes[0].chain_monitor.clone(), nodes[0].node.clone(), nodes[0].peer_manager.clone(), nodes[0].app_handler.clone(), nodes[0].logger.clone());
 
 		macro_rules! check_persisted_data {
 			($node: expr, $filepath: expr, $expected_bytes: expr) => {
@@ -397,7 +403,7 @@ mod tests {
 		let data_dir = nodes[0].persister.get_data_dir();
 		let persister = move |node: &ChannelManager<InMemorySigner, Arc<ChainMonitor>, Arc<test_utils::TestBroadcaster>, Arc<KeysManager>, Arc<test_utils::TestFeeEstimator>, Arc<test_utils::TestLogger>>| FilesystemPersister::persist_manager(data_dir.clone(), node);
 		let event_handler = |_| {};
-		let bg_processor = BackgroundProcessor::start(persister, event_handler, nodes[0].chain_monitor.clone(), nodes[0].node.clone(), nodes[0].peer_manager.clone(), nodes[0].logger.clone());
+		let bg_processor = BackgroundProcessor::start(persister, event_handler, nodes[0].chain_monitor.clone(), nodes[0].node.clone(), nodes[0].peer_manager.clone(), nodes[0].app_handler.clone(), nodes[0].logger.clone());
 		loop {
 			let log_entries = nodes[0].logger.lines.lock().unwrap();
 			let desired_log = "Calling ChannelManager's and PeerManager's timer_tick_occurred".to_string();
@@ -417,7 +423,7 @@ mod tests {
 
 		let persister = |_: &_| Err(std::io::Error::new(std::io::ErrorKind::Other, "test"));
 		let event_handler = |_| {};
-		let bg_processor = BackgroundProcessor::start(persister, event_handler, nodes[0].chain_monitor.clone(), nodes[0].node.clone(), nodes[0].peer_manager.clone(), nodes[0].logger.clone());
+		let bg_processor = BackgroundProcessor::start(persister, event_handler, nodes[0].chain_monitor.clone(), nodes[0].node.clone(), nodes[0].peer_manager.clone(), nodes[0].app_handler.clone(), nodes[0].logger.clone());
 		let _ = bg_processor.thread_handle.join().unwrap().expect_err("Errored persisting manager: test");
 	}
 
@@ -433,7 +439,7 @@ mod tests {
 		let event_handler = move |event| {
 			sender.send(handle_funding_generation_ready!(event, channel_value)).unwrap();
 		};
-		let bg_processor = BackgroundProcessor::start(persister.clone(), event_handler, nodes[0].chain_monitor.clone(), nodes[0].node.clone(), nodes[0].peer_manager.clone(), nodes[0].logger.clone());
+		let bg_processor = BackgroundProcessor::start(persister.clone(), event_handler, nodes[0].chain_monitor.clone(), nodes[0].node.clone(), nodes[0].peer_manager.clone(), nodes[0].app_handler.clone(), nodes[0].logger.clone());
 
 		// Open a channel and check that the FundingGenerationReady event was handled.
 		begin_open_channel!(nodes[0], nodes[1], channel_value);
@@ -457,7 +463,7 @@ mod tests {
 		// Set up a background event handler for SpendableOutputs events.
 		let (sender, receiver) = std::sync::mpsc::sync_channel(1);
 		let event_handler = move |event| sender.send(event).unwrap();
-		let bg_processor = BackgroundProcessor::start(persister, event_handler, nodes[0].chain_monitor.clone(), nodes[0].node.clone(), nodes[0].peer_manager.clone(), nodes[0].logger.clone());
+		let bg_processor = BackgroundProcessor::start(persister, event_handler, nodes[0].chain_monitor.clone(), nodes[0].node.clone(), nodes[0].peer_manager.clone(), nodes[0].app_handler.clone(), nodes[0].logger.clone());
 
 		// Force close the channel and check that the SpendableOutputs event was handled.
 		nodes[0].node.force_close_channel(&nodes[0].node.list_channels()[0].channel_id).unwrap();
