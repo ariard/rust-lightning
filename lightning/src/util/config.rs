@@ -206,7 +206,18 @@ pub struct ChannelConfig {
 	/// This cannot be changed after a channel has been initialized.
 	///
 	/// Default value: true.
-	pub commit_upfront_shutdown_pubkey: bool
+	pub commit_upfront_shutdown_pubkey: bool,
+	/// Limit on the maximum value of dusted offered HTLCs to the counterparty at any given time
+	/// to limit holder balance exposure to HTLCs. Dusted HTLCs are defined as any HTLC lower
+	/// than counterparty's `dust_limit_satoshis` sumed up with their expexted onchain claim
+	/// cost at minimal mempools congestion.
+	///
+	/// Note, to support reading serialized configs before 0.0.100, the default value will be
+	/// always yielded at deser. A user-selected value must override such value before the
+	/// config is passed to ChannelManager.
+	///
+	/// Default value: 5_000_000 msat.
+	pub max_outbound_dusted_htlc_msat: u64,
 }
 
 impl Default for ChannelConfig {
@@ -218,6 +229,7 @@ impl Default for ChannelConfig {
 			cltv_expiry_delta: 6 * 12, // 6 blocks/hour * 12 hours
 			announced_channel: false,
 			commit_upfront_shutdown_pubkey: true,
+			max_outbound_dusted_htlc_msat: 10_000_000,
 		}
 	}
 }
@@ -228,6 +240,7 @@ impl_writeable_tlv_based!(ChannelConfig, {
 	(4, announced_channel, required),
 	(6, commit_upfront_shutdown_pubkey, required),
 	(8, forwarding_fee_base_msat, required),
+	(10, max_outbound_dusted_htlc_msat, (default_value, 10_000_000)),
 });
 
 /// Top-level config which holds ChannelHandshakeLimits and ChannelConfig.

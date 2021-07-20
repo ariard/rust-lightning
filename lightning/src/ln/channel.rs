@@ -1759,12 +1759,18 @@ impl<Signer: Sign> Channel<Signer> {
 		(self.pending_inbound_htlcs.len() as u32, htlc_inbound_value_msat)
 	}
 
-	/// Returns (outbound_htlc_count, htlc_outbound_value_msat) *including* pending adds in our
-	/// holding cell.
-	fn get_outbound_pending_htlc_stats(&self) -> (u32, u64) {
+	/// Returns (outbound_htlc_count, htlc_outbound_value_msat, outbound_dusted_htlc_value_msat) *including*
+	/// pending adds in our holding cell.
+	fn get_outbound_pending_htlc_stats(&self) -> (u32, u64, u64) {
 		let mut htlc_outbound_value_msat = 0;
+		let mut outbound_dusted_htlc_msat = 0;
+
+		let real_dust_limit_success_sat = (self.feerate_per_kw as u64 * HTLC_SUCCESS_TX_WEIGHT / 1000) + self.counterparty_dust_limit_satoshis;
 		for ref htlc in self.pending_outbound_htlcs.iter() {
 			htlc_outbound_value_msat += htlc.amount_msat;
+			if htlc.amount_msat / 1000 < real_dust_limit_success_sat {
+				outbound_dusted_htlc_msat += htlc.amount_msat + (self.feerate_per_kw as u64 * HTLC_SUCCESS_TX_WEIGHT / 1000) * 1000;
+			}
 		}
 
 		let mut htlc_outbound_count = self.pending_outbound_htlcs.len();
@@ -1772,10 +1778,13 @@ impl<Signer: Sign> Channel<Signer> {
 			if let &HTLCUpdateAwaitingACK::AddHTLC { ref amount_msat, .. } = update {
 				htlc_outbound_count += 1;
 				htlc_outbound_value_msat += amount_msat;
+				if *amount_msat / 1000 < real_dust_limit_success_sat {
+					outbound_dusted_htlc_msat += amount_msat + (self.feerate_per_kw as u64 * HTLC_SUCCESS_TX_WEIGHT / 1000) * 1000;
+				}
 			}
 		}
 
-		(htlc_outbound_count as u32, htlc_outbound_value_msat)
+		(htlc_outbound_count as u32, htlc_outbound_value_msat, outbound_dusted_htlc_msat)
 	}
 
 	/// Get the available (ie not including pending HTLCs) inbound and outbound balance in msat.
@@ -3432,6 +3441,10 @@ impl<Signer: Sign> Channel<Signer> {
 		cmp::max(self.config.cltv_expiry_delta, MIN_CLTV_EXPIRY_DELTA)
 	}
 
+	pub fn get_max_outbound_dusted_htlc_msat(&self) -> u64 {
+		self.config.max_outbound_dusted_htlc_msat
+	}
+
 	#[cfg(test)]
 	pub fn get_feerate(&self) -> u32 {
 		self.feerate_per_kw
@@ -4075,7 +4088,7 @@ impl<Signer: Sign> Channel<Signer> {
 			return Err(ChannelError::Ignore("Cannot send an HTLC while disconnected from channel counterparty".to_owned()));
 		}
 
-		let (outbound_htlc_count, htlc_outbound_value_msat) = self.get_outbound_pending_htlc_stats();
+		let (outbound_htlc_count, htlc_outbound_value_msat, outbound_dusted_htlc_value_msat) = self.get_outbound_pending_htlc_stats();
 		if outbound_htlc_count + 1 > self.counterparty_max_accepted_htlcs as u32 {
 			return Err(ChannelError::Ignore(format!("Cannot push more than their max accepted HTLCs ({})", self.counterparty_max_accepted_htlcs)));
 		}
@@ -4093,6 +4106,10 @@ impl<Signer: Sign> Channel<Signer> {
 			if counterparty_balance_msat < holder_selected_chan_reserve_msat + counterparty_commit_tx_fee_msat {
 				return Err(ChannelError::Ignore("Cannot send value that would put counterparty balance under holder-announced channel reserve value".to_owned()));
 			}
+		}
+
+		if outbound_dusted_htlc_value_msat + amount_msat > self.get_max_outbound_dusted_htlc_msat() {
+			return Err(ChannelError::Ignore(format!("Cannot send value that would put holder dusted balance on counterparty commitment over limit {}", self.get_max_outbound_dusted_htlc_msat())));
 		}
 
 		let pending_value_to_self_msat = self.value_to_self_msat - htlc_outbound_value_msat;
