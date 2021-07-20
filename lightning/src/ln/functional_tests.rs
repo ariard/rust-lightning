@@ -9550,3 +9550,43 @@ fn test_tx_confirmed_skipping_blocks_immediate_broadcast() {
 	do_test_tx_confirmed_skipping_blocks_immediate_broadcast(false);
 	do_test_tx_confirmed_skipping_blocks_immediate_broadcast(true);
 }
+
+#[test]
+fn test_max_outbound_dusted_htlc_msat() {
+	let chanmon_cfgs = create_chanmon_cfgs(2);
+	let node_cfgs = create_node_cfgs(2, &chanmon_cfgs);
+	let node_chanmgrs = create_node_chanmgrs(2, &node_cfgs, &[None, None]);
+	let mut nodes = create_network(2, &node_cfgs, &node_chanmgrs);
+
+	nodes[0].node.create_channel(nodes[1].node.get_our_node_id(), 1_000_000, 500_000_000, 42, None).unwrap();
+	let mut open_channel = get_event_msg!(nodes[0], MessageSendEvent::SendOpenChannel, nodes[1].node.get_our_node_id());
+	open_channel.max_htlc_value_in_flight_msat = 50_000_000;
+	open_channel.max_accepted_htlcs = 60;
+	nodes[1].node.handle_open_channel(&nodes[0].node.get_our_node_id(), InitFeatures::known(), &open_channel);
+	let accept_channel = get_event_msg!(nodes[1], MessageSendEvent::SendAcceptChannel, nodes[0].node.get_our_node_id());
+	nodes[0].node.handle_accept_channel(&nodes[1].node.get_our_node_id(), InitFeatures::known(), &accept_channel);
+
+	let (temporary_channel_id, tx, _) = create_funding_transaction(&nodes[0], 1_000_000, 42);
+
+	nodes[0].node.funding_transaction_generated(&temporary_channel_id, tx.clone()).unwrap();
+	nodes[1].node.handle_funding_created(&nodes[0].node.get_our_node_id(), &get_event_msg!(nodes[0], MessageSendEvent::SendFundingCreated, nodes[1].node.get_our_node_id()));
+	check_added_monitors!(nodes[1], 1);
+
+	nodes[0].node.handle_funding_signed(&nodes[1].node.get_our_node_id(), &get_event_msg!(nodes[1], MessageSendEvent::SendFundingSigned, nodes[0].node.get_our_node_id()));
+	check_added_monitors!(nodes[0], 1);
+
+	let (funding_locked, _) = create_chan_between_nodes_with_value_confirm(&nodes[0], &nodes[1], &tx);
+	let (announcement, as_update, bs_update) = create_chan_between_nodes_with_value_b(&nodes[0], &nodes[1], &funding_locked);
+	update_nodes_with_chan_announce(&nodes, 0, 1, &announcement, &as_update, &bs_update);
+
+	for _ in 0..50 {
+		let (route, payment_hash, _, payment_secret) = get_route_and_payment_hash!(nodes[1], nodes[0], 330_000);
+		if let Err(_) = nodes[1].node.send_payment(&route, payment_hash, &Some(payment_secret)) { panic!("Unexpected event"); }
+	}
+	let (route, payment_hash, _, payment_secret) = get_route_and_payment_hash!(nodes[1], nodes[0], 330_000);
+	let mut config = UserConfig::default();
+	unwrap_send_err!(nodes[1].node.send_payment(&route, payment_hash, &Some(payment_secret)), true, APIError::ChannelUnavailable { ref err }, assert_eq!(err, &format!("Cannot send value that would put holder dusted balance on counterparty commitment over limit {}", config.channel_options.max_outbound_dusted_htlc_msat)));
+	let _ = nodes[1].node.get_and_clear_pending_msg_events();
+	let mut added_monitors = nodes[1].chain_monitor.added_monitors.lock().unwrap();
+	added_monitors.clear();
+}
