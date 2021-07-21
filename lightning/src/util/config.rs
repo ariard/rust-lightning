@@ -229,7 +229,7 @@ impl Default for ChannelConfig {
 			cltv_expiry_delta: 6 * 12, // 6 blocks/hour * 12 hours
 			announced_channel: false,
 			commit_upfront_shutdown_pubkey: true,
-			max_outbound_dusted_htlc_msat: 10_000_000,
+			max_outbound_dusted_htlc_msat: 5_000_000,
 		}
 	}
 }
@@ -240,7 +240,7 @@ impl_writeable_tlv_based!(ChannelConfig, {
 	(4, announced_channel, required),
 	(6, commit_upfront_shutdown_pubkey, required),
 	(8, forwarding_fee_base_msat, required),
-	(10, max_outbound_dusted_htlc_msat, (default_value, 10_000_000)),
+	(10, max_outbound_dusted_htlc_msat, (default_value, 5_000_000)),
 });
 
 /// Top-level config which holds ChannelHandshakeLimits and ChannelConfig.
