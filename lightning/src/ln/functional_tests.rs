@@ -9555,7 +9555,7 @@ fn test_tx_confirmed_skipping_blocks_immediate_broadcast() {
 fn test_max_outbound_dusted_htlc_msat() {
 	let chanmon_cfgs = create_chanmon_cfgs(2);
 	let mut config = test_default_channel_config();
-	config.channel_options.max_outbound_dusted_htlc_msat = 5_000_000; // production default value
+	config.channel_options.max_balance_dust_htlc_msat = 5_000_000; // production default value
 	let node_cfgs = create_node_cfgs(2, &chanmon_cfgs);
 	let node_chanmgrs = create_node_chanmgrs(2, &node_cfgs, &[None, Some(config)]);
 	let mut nodes = create_network(2, &node_cfgs, &node_chanmgrs);
@@ -9587,7 +9587,7 @@ fn test_max_outbound_dusted_htlc_msat() {
 	}
 	let (route, payment_hash, _, payment_secret) = get_route_and_payment_hash!(nodes[1], nodes[0], 100_000);
 	let mut config = UserConfig::default();
-	unwrap_send_err!(nodes[1].node.send_payment(&route, payment_hash, &Some(payment_secret)), true, APIError::ChannelUnavailable { ref err }, assert_eq!(err, &format!("Cannot send value that would put holder dusted balance on counterparty commitment over limit {}", config.channel_options.max_outbound_dusted_htlc_msat)));
+	unwrap_send_err!(nodes[1].node.send_payment(&route, payment_hash, &Some(payment_secret)), true, APIError::ChannelUnavailable { ref err }, assert_eq!(err, &format!("Cannot send value that would put holder dusted balance on counterparty commitment over limit {}", config.channel_options.max_balance_dust_htlc_msat)));
 	let _ = nodes[1].node.get_and_clear_pending_msg_events();
 	let mut added_monitors = nodes[1].chain_monitor.added_monitors.lock().unwrap();
 	added_monitors.clear();

@@ -1354,9 +1354,9 @@ pub fn test_default_channel_config() -> UserConfig {
 	// When most of our tests were written, the default HTLC minimum was fixed at 1000.
 	// It now defaults to 1, so we simply set it to the expected value here.
 	default_config.own_channel_config.our_htlc_minimum_msat = 1000;
-	// When most of our tests were written, we didn't have notion of a `max_outbound_dusted_htlc_msat`,
+	// When most of our tests were written, we didn't have notion of a `max_balance_dust_htlc_msat`,
 	// It now defaults to 5_000_000 msat, to avoid interferring with tests we bump it to 50_000_000 msat.
-	default_config.channel_options.max_outbound_dusted_htlc_msat = 50_000_000;
+	default_config.channel_options.max_balance_dust_htlc_msat = 50_000_000;
 	default_config
 }
 

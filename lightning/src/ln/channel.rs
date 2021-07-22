@@ -1751,12 +1751,18 @@ impl<Signer: Sign> Channel<Signer> {
 	}
 
 	/// Returns (inbound_htlc_count, htlc_inbound_value_msat)
-	fn get_inbound_pending_htlc_stats(&self) -> (u32, u64) {
+	fn get_inbound_pending_htlc_stats(&self) -> (u32, u64, u64) {
 		let mut htlc_inbound_value_msat = 0;
+		let mut inbound_dusted_htlc_msat = 0;
+
+		let real_dust_limit_timeout_sat = (self.feerate_per_kw as u64 * HTLC_TIMEOUT_TX_WEIGHT / 1000) + self.counterparty_dust_limit_satoshis;
 		for ref htlc in self.pending_inbound_htlcs.iter() {
 			htlc_inbound_value_msat += htlc.amount_msat;
+			if htlc.amount_msat / 1000 < real_dust_limit_timeout_sat {
+				inbound_dusted_htlc_msat += htlc.amount_msat + (self.feerate_per_kw as u64 * HTLC_TIMEOUT_TX_WEIGHT / 1000) * 1000;
+			}
 		}
-		(self.pending_inbound_htlcs.len() as u32, htlc_inbound_value_msat)
+		(self.pending_inbound_htlcs.len() as u32, htlc_inbound_value_msat, inbound_dusted_htlc_msat)
 	}
 
 	/// Returns (outbound_htlc_count, htlc_outbound_value_msat, outbound_dusted_htlc_value_msat) *including*
@@ -2012,7 +2018,7 @@ impl<Signer: Sign> Channel<Signer> {
 			return Err(ChannelError::Close(format!("Remote side tried to send less than our minimum HTLC value. Lower limit: ({}). Actual: ({})", self.holder_htlc_minimum_msat, msg.amount_msat)));
 		}
 
-		let (inbound_htlc_count, htlc_inbound_value_msat) = self.get_inbound_pending_htlc_stats();
+		let (inbound_htlc_count, htlc_inbound_value_msat, inbound_dusted_htlc_msat) = self.get_inbound_pending_htlc_stats();
 		if inbound_htlc_count + 1 > OUR_MAX_HTLCS as u32 {
 			return Err(ChannelError::Close(format!("Remote tried to push more than our max accepted HTLCs ({})", OUR_MAX_HTLCS)));
 		}
@@ -2039,6 +2045,11 @@ impl<Signer: Sign> Channel<Signer> {
 			} else if let OutboundHTLCState::AwaitingRemovedRemoteRevoke(None) = htlc.state {
 				removed_outbound_total_msat += htlc.amount_msat;
 			}
+		}
+
+		if inbound_dusted_htlc_msat + msg.amount_msat > self.get_max_balance_dust_htlc_msat() {
+			log_info!(logger, "Cannot accept value that would put holder dusted balance on counterparty commitment over limit {}", self.get_max_balance_dust_htlc_msat());
+			pending_forward_status = create_pending_htlc_status(self, pending_forward_status, 0x4000|15);
 		}
 
 		let pending_value_to_self_msat =
@@ -3441,8 +3452,8 @@ impl<Signer: Sign> Channel<Signer> {
 		cmp::max(self.config.cltv_expiry_delta, MIN_CLTV_EXPIRY_DELTA)
 	}
 
-	pub fn get_max_outbound_dusted_htlc_msat(&self) -> u64 {
-		self.config.max_outbound_dusted_htlc_msat
+	pub fn get_max_balance_dust_htlc_msat(&self) -> u64 {
+		self.config.max_balance_dust_htlc_msat
 	}
 
 	#[cfg(test)]
@@ -4108,8 +4119,8 @@ impl<Signer: Sign> Channel<Signer> {
 			}
 		}
 
-		if outbound_dusted_htlc_value_msat + amount_msat > self.get_max_outbound_dusted_htlc_msat() {
-			return Err(ChannelError::Ignore(format!("Cannot send value that would put holder dusted balance on counterparty commitment over limit {}", self.get_max_outbound_dusted_htlc_msat())));
+		if outbound_dusted_htlc_value_msat + amount_msat > self.get_max_balance_dust_htlc_msat() {
+			return Err(ChannelError::Ignore(format!("Cannot send value that would put holder dusted balance on counterparty commitment over limit {}", self.get_max_balance_dust_htlc_msat())));
 		}
 
 		let pending_value_to_self_msat = self.value_to_self_msat - htlc_outbound_value_msat;
